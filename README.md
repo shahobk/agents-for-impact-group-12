@@ -6,6 +6,9 @@
 
 - [Open the Pantry Relay app](https://atlanta-grocery-rescue-dmyvsl27jq-uc.a.run.app/)
 - [Explore the architecture and solution diagram](https://pantry-relay-architecture-dmyvsl27jq-uc.a.run.app/)
+- [Watch the 1-minute promo video](videos/pantry-relay-promo/renders/video.mp4)
+
+<video src="https://raw.githubusercontent.com/shahobk/agents-for-impact-group-12/main/videos/pantry-relay-promo/renders/video.mp4" controls width="720"></video>
 
 ---
 
