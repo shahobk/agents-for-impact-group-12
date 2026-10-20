@@ -25,3 +25,4 @@ adk deploy cloud_run \
   --service_name="${SERVICE_NAME}" \
   --with_ui \
   agent
+
