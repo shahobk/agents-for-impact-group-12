@@ -2,6 +2,11 @@
 
 **Agents for Impact 2026**
 
+## Live deployments
+
+- [Open the Pantry Relay app](https://atlanta-grocery-rescue-dmyvsl27jq-uc.a.run.app/)
+- [Explore the architecture and solution diagram](https://pantry-relay-architecture-dmyvsl27jq-uc.a.run.app/)
+
 ---
 
 ## Atlanta implementation quickstart
@@ -14,11 +19,7 @@ notifications; the first qualified acceptance receives an atomic, ten-minute
 hold; and donor, recipient, and coordinator views read the same authoritative
 workflow state.
 
-The public deployment is:
-
-<https://atlanta-grocery-rescue-61272668502.us-central1.run.app>
-
-The URL is public for the no-account donor demo. The deployed flow uses the ADK
+The app is public for the no-account donor demo. The deployed flow uses the ADK
 root agent, its custom matcher tool, brute-force BigQuery `VECTOR_SEARCH`,
 Firestore transactions, and versioned OIDC-authenticated Cloud Tasks. Address,
 GPS, and map-pin pickup input replace raw coordinate fields. Speech and photo
