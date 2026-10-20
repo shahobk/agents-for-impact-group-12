@@ -1,0 +1,13 @@
+.git
+.gitignore
+.pytest_cache
+.venv
+__pycache__
+*.py[cod]
+*.ipynb
+data/*
+!data/foodkeeper.json
+docs
+notebooks
+scripts
+tests

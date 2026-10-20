@@ -4,6 +4,113 @@
 
 ---
 
+## Atlanta implementation quickstart
+
+Pantry Relay is an Atlanta retail-and-grocer rescue workflow built around a
+six-hour offer of ten refrigerated spinach crates. One FastAPI/Cloud Run service
+hosts one role-switching SPA and the workflow APIs. The donor can create an
+offer; up to three pre-approved recipients receive simulated inbox
+notifications; the first qualified acceptance receives an atomic, ten-minute
+hold; and donor, recipient, and coordinator views read the same authoritative
+workflow state.
+
+The current public deployment checkpoint is Cloud Run revision `00009-pc7`:
+
+<https://atlanta-grocery-rescue-61272668502.us-central1.run.app>
+
+The URL is public for the no-account donor demo. Firestore readiness and real
+OIDC-authenticated Cloud Tasks delivery, reservation expiry, and silent-wave
+promotion are verified. The final revision's deployed `AI.EMBED` path still
+awaits the explicitly documented Vertex AI runtime grant, so the complete
+public spinach path is not yet claimed.
+
+### Run locally
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+.venv/bin/uvicorn agent.service:app --reload
+```
+
+Open <http://127.0.0.1:8000/?role=donor>. Local defaults use the in-memory
+workflow repository and scheduler, credential-free demo candidates when cloud
+matching is unavailable, and demo authorization. They are intentionally not
+evidence of durable cloud behavior.
+
+Role instructions:
+
+1. **Donor:** choose **Load spinach scenario**, review quantity, storage,
+   location, transport, and deadline, then submit. Keep the private status view
+   open.
+2. **Recipient:** use one of the current-wave demo-session buttons returned
+   after donor submission. Accept temporarily, confirm within the countdown,
+   then record completion.
+3. **Coordinator:** switch to **Coordinator** and enter the separately managed
+   coordinator demo bearer token. Inspect the shared queue, deterministic
+   candidate audit, timeline, impact, and controlled recovery actions. Never
+   publish the token in documentation or a URL.
+
+Donor and recipient access links carry opaque tokens in the URL fragment
+(`/?role=recipient#token=...`). The SPA reads the token, immediately removes the
+fragment, and sends it only in the `Authorization: Bearer` header. Mutation
+requests also use idempotency keys. Raw tokens are not displayed in the UI.
+
+Run verification with:
+
+```bash
+.venv/bin/pytest -q
+node --check frontend/app.js
+```
+
+At the newest local checkpoint, all 37 Python tests passed and the
+installed Playwright CLI completed spinach submission, hold, refresh-safe
+confirmation, completion, donor polling, coordinator impact, and simulated
+silent-wave promotion with zero browser console errors. See
+[`docs/VALIDATION.md`](docs/VALIDATION.md) for the exact evidence boundary.
+
+### Provision and deploy the cloud target
+
+```bash
+export PROJECT_ID="$(gcloud config get-value project)"
+bash scripts/provision_cloud.sh
+bash scripts/load.sh atlanta
+bq --location=US query --use_legacy_sql=false \
+  < sql/01_materialize_recipient_embeddings.sql
+bash scripts/deploy_cloud_run.sh
+```
+
+The scripts target a single public Cloud Run service with a dedicated runtime
+identity, Firestore workflow repository, Cloud Tasks timeout queue and OIDC
+caller, Secret Manager values, and a lifecycle-managed Cloud Storage bucket.
+Real BigQuery vector retrieval and the protected managed BigQuery MCP path are
+separate from deterministic eligibility and workflow transitions. Confirm the
+deployed gates in [`docs/VALIDATION.md`](docs/VALIDATION.md) before presenting
+them as working.
+
+### What is real, simulated, and approximate
+
+| Component | Current label |
+|---|---|
+| Eligibility and workflow transitions | Deterministic application code; the LLM does not decide eligibility or claims |
+| Local offer/hold/confirm/complete path | Verified against the integrated FastAPI service with in-memory adapters |
+| Public Cloud Run revision | Real deployment with Firestore readiness and authenticated task expiry proven; final real-matcher browser completion remains pending |
+| Recipient notifications | Simulated in-app inbox, not email/SMS/push |
+| Recipient identity | Pre-approved demo recipients; no public onboarding or production identity proofing |
+| Organization identity and reported IRS attributes | Source data; see the challenge reference below |
+| Capacity, cold storage, schedules, transport, and profile prose | Generated operational demo attributes; live availability must be reconfirmed |
+| Recipient location and neighborhood need | Approximate ZIP-centroid/nearest-tract evidence where available |
+| Donor deadline | Donor-confirmed and authoritative |
+| FoodKeeper context | Advisory only; never an automatic food-safety decision |
+| Route distance | Estimated/haversine fallback unless an explicitly evidenced Maps result is shown |
+
+Architecture, demo steps, and limitations are maintained in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+[`docs/DEMO.md`](docs/DEMO.md), and
+[`docs/VALIDATION.md`](docs/VALIDATION.md).
+
+---
+
 ## Why this one matters
 
 Somewhere in your city this afternoon, a grocer is going to throw away four hundred pounds of

@@ -5,6 +5,8 @@ __pycache__/
 venv/
 env/
 .ipynb_checkpoints/
+.pytest_cache/
+.playwright-cli/
 
 # Credentials - never commit these
 *.json.key
@@ -20,3 +22,6 @@ Thumbs.db
 data/*.csv
 data/*.parquet
 !data/profile_components.json
+
+# Local planning, validation, and evidence.
+docs/
