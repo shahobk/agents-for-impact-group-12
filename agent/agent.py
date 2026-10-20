@@ -1840,7 +1840,53 @@ When a coordinator gives you a surplus food posting or asks a dispatch question:
 6. **Know When to Refuse or Ask**:
    - If a posting is too vague (missing item or timeframe), ask a concise clarifying question.
    - If `hours_remaining <= 0` or no single/split option can safely collect before spoilage, refuse the match and explain why.
+7. **Managed BigQuery / MCP Toolset vs. Purpose-Built Broker Tools**:
+   - Always use your purpose-built tools (`lookup_shelf_life`, `find_matching_recipients`, `decline_recipient_and_reroute`, `check_fda_food_recalls`, `onboard_new_pantry`, `run_metro_equity_audit`) for brokering, constraint filtering, and equity ranking.
+   - Use the managed BigQuery / MCP toolset (`list_table_ids`, `get_table_info`, `execute_sql`) only when the coordinator asks ad-hoc exploratory SQL questions about raw tables in `a4i_food`.
 """
+
+
+def _build_managed_mcp_tools() -> list[Any]:
+    """Attach ADK's managed BigQueryToolset and/or a remote MCP Toolbox server (`MCP_TOOLBOX_URL`)."""
+    managed_tools: list[Any] = []
+
+    # 1. Optional remote MCP server (e.g., MCP Toolbox on Cloud Run serving agent/tools.yaml or https://bigquery.googleapis.com/mcp)
+    mcp_url = os.getenv("MCP_TOOLBOX_URL", "").strip()
+    if mcp_url:
+        try:
+            from google.adk.tools.mcp_tool.mcp_toolset import (
+                McpToolset,
+                StreamableHTTPConnectionParams,
+            )
+
+            managed_tools.append(
+                McpToolset(
+                    connection_params=StreamableHTTPConnectionParams(url=mcp_url)
+                )
+            )
+        except Exception:
+            pass
+
+    # 2. Built-in managed BigQuery toolset for generic table/schema inspection & ad-hoc queries
+    if os.getenv("ENABLE_BIGQUERY_TOOLSET", "TRUE").upper() == "TRUE":
+        try:
+            from google.adk.integrations.bigquery import BigQueryToolset
+
+            managed_tools.append(
+                BigQueryToolset(
+                    tool_filter=[
+                        "list_dataset_ids",
+                        "list_table_ids",
+                        "get_table_info",
+                        "execute_sql",
+                    ]
+                )
+            )
+        except Exception:
+            pass
+
+    return managed_tools
+
 
 root_agent = Agent(
     name="food_surplus_broker",
@@ -1855,5 +1901,6 @@ root_agent = Agent(
         check_fda_food_recalls,
         onboard_new_pantry,
         run_metro_equity_audit,
+        *_build_managed_mcp_tools(),
     ],
 )

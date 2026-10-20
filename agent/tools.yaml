@@ -1,0 +1,110 @@
+# MCP Toolbox for Databases configuration for Challenge 2: Resilient Food Equity & Surplus Broker
+# Reference: https://github.com/googleapis/mcp-toolbox
+sources:
+  a4i_bigquery:
+    kind: bigquery
+    project: ${GOOGLE_CLOUD_PROJECT}
+    location: US
+
+tools:
+  list_open_surplus_postings_mcp:
+    kind: bigquery-sql
+    source: a4i_bigquery
+    description: List incoming surplus food postings in the a4i_food.surplus_postings queue ordered by urgency (hours_remaining ASC).
+    statement: |
+      SELECT
+        posting_id,
+        track,
+        posting_text,
+        foodkeeper_product,
+        storage_state,
+        hours_available,
+        shelf_life_hours,
+        hours_remaining
+      FROM `a4i_food.surplus_postings`
+      ORDER BY hours_remaining ASC, posting_id ASC
+
+  get_metro_tract_demographics_summary_mcp:
+    kind: bigquery-sql
+    source: a4i_bigquery
+    description: Get population-weighted poverty, no-vehicle, assistance rate, and median household income across valid populated census tracts in the metro.
+    statement: |
+      SELECT
+        COUNT(*) AS valid_populated_tracts,
+        ROUND(SUM(poverty_rate * total_pop) / SUM(total_pop) * 100, 1) AS pop_weighted_poverty_pct,
+        ROUND(SUM(no_vehicle_rate * total_pop) / SUM(total_pop) * 100, 1) AS pop_weighted_no_vehicle_pct,
+        ROUND(SUM(assistance_rate * total_pop) / SUM(total_pop) * 100, 1) AS pop_weighted_assistance_pct,
+        ROUND(AVG(median_income), 0) AS avg_tract_median_income_usd,
+        ROUND(MIN(median_income), 0) AS min_tract_median_income_usd,
+        ROUND(MAX(median_income), 0) AS max_tract_median_income_usd
+      FROM `a4i_food.tract_demographics`
+      WHERE total_pop > 0 AND median_income > 0
+
+  search_recipients_by_vector_mcp:
+    kind: bigquery-sql
+    source: a4i_bigquery
+    description: Run BigQuery VECTOR_SEARCH over a4i_food.recipient_embeddings joined with nearest valid census tract from a4i_food.tract_demographics.
+    parameters:
+      - name: query_text
+        type: string
+        description: Surplus food posting text to embed and match against recipient profiles.
+    statement: |
+      WITH candidates AS (
+        SELECT
+          base.recipient_id,
+          base.name,
+          base.street,
+          base.city,
+          base.state,
+          base.zip_code,
+          base.cold_storage,
+          base.frozen_storage,
+          base.loading_dock,
+          base.refrigerated_transport,
+          base.max_pallets,
+          base.pickup_window_hours,
+          base.weekly_households,
+          base.service_days,
+          base.profile_text,
+          base.latitude,
+          base.longitude,
+          ROUND(distance, 4) AS distance
+        FROM VECTOR_SEARCH(
+          TABLE `a4i_food.recipient_embeddings`,
+          'embedding',
+          (
+            SELECT AI.EMBED(
+              @query_text,
+              endpoint => 'gemini-embedding-2'
+            ).result AS embedding
+          ),
+          top_k => 15,
+          options => '{"use_brute_force":true}'
+        )
+      )
+      SELECT
+        c.*,
+        t.geo_id AS tract_geo_id,
+        ROUND(t.median_income, 0) AS tract_median_income,
+        ROUND(t.poverty_rate, 3) AS tract_poverty_rate,
+        ROUND(t.no_vehicle_rate, 3) AS tract_no_vehicle_rate,
+        ROUND(t.assistance_rate, 3) AS tract_assistance_rate
+      FROM candidates c
+      LEFT JOIN `a4i_food.tract_demographics` t
+        ON t.geo_id = (
+          SELECT td.geo_id
+          FROM `a4i_food.tract_demographics` td
+          WHERE td.total_pop > 0 AND td.median_income > 0
+          ORDER BY ST_DISTANCE(
+            ST_GEOGPOINT(c.longitude, c.latitude),
+            ST_GEOGPOINT(td.tract_lon, td.tract_lat)
+          ) ASC
+          LIMIT 1
+        )
+      ORDER BY c.distance ASC
+
+toolsets:
+  food_equity_broker_toolset:
+    - list_open_surplus_postings_mcp
+    - get_metro_tract_demographics_summary_mcp
+    - search_recipients_by_vector_mcp
