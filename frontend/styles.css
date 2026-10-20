@@ -205,7 +205,6 @@ form { margin: 0; }
 .candidate-mark.fail { color: var(--red); background: var(--red-bg); }
 .timeline li { display: flex; gap: 12px; }
 .timeline li > span { width: 9px; height: 9px; margin-top: 6px; background: var(--green); border: 2px solid white; border-radius: 50%; box-shadow: 0 0 0 2px #b9cfc5; }
-.demo-access { display: grid; gap: 7px; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
 
 .inbox-layout, .ops-layout { display: grid; grid-template-columns: minmax(280px, .7fr) minmax(0, 1.3fr); gap: 18px; align-items: start; }
 .inbox-layout.single-offer { grid-template-columns: minmax(0, 850px); justify-content: center; }

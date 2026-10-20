@@ -644,13 +644,14 @@
 
   function renderDonorStatus() {
     if (!state.token) return renderMissingContext("donor");
-    workspace.innerHTML = loadingView("Loading donor status…");
+    workspace.innerHTML = loadingView("Loading your offer…");
     loadDonorStatus();
   }
 
   async function loadDonorStatus() {
     try {
       state.data = await api("/api/offers/status");
+      if (state.role !== "status") return;
       if (Array.isArray(state.data.demo_recipient_access)) {
         state.demoRecipients = state.data.demo_recipient_access;
         sessionStorage.setItem("pantry-relay:demo-recipients", JSON.stringify(state.demoRecipients));
@@ -664,38 +665,206 @@
     }
   }
 
+  // Polling redraws every 2s, so the page is built once per offer and then
+  // only the regions whose content changed are replaced. That keeps focus,
+  // open <details>, and the live map intact between polls.
+  const statusRegionHtml = new WeakMap();
+  const STATUS_STEPS = ["submitted", "matching", "notified", "reserved", "confirmed", "completed"];
+
   function drawDonorStatus() {
     const offer = offerOf(state.data);
+    const offerId = offer.offer_id || offer.id || "";
     const events = arrayOf(state.data.events || offer.events);
     const candidates = arrayOf(state.data.candidates || offer.candidates);
     const reservation = state.data.reservation || offer.reservation;
-    workspace.innerHTML = `
-      ${pageLead("Donor status", "Your rescue, from matching to handoff.", "This view polls the same authoritative workflow record shown to recipients and coordinators.")}
-      <div class="dashboard-grid">
-        <section class="panel span-2">
-          <div class="section-heading"><div><p class="kicker">Offer ${e(shortId(offer.offer_id || offer.id))}</p><h2>${e(offer.description_original || offer.description || "Food rescue offer")}</h2></div>${statusPill(offer.status)}</div>
-          ${progress(offer.status)}
-          <div class="fact-grid">
-            ${fact("Quantity", offer.quantity_original || pallets(offer.quantity_pallets))}
-            ${fact("Storage", title(offer.storage_state))}
-            ${fact("Deadline", dateTime(offer.deadline || offer.pickup_deadline))}
-            ${fact("Transport", transportLabel(offer.transport_mode))}
+    let root = workspace.querySelector(".status-view");
+    if (!root || root.dataset.offerId !== offerId) {
+      workspace.innerHTML = `
+        <section class="status-view" data-offer-id="${e(offerId)}" aria-labelledby="status-sentence">
+          <div class="status-head">
+            <h1 id="status-sentence" class="status-sentence" aria-live="polite"></h1>
+            <p class="status-detail" data-region="detail"></p>
+            <div data-region="action"></div>
+            <div class="status-progress" data-region="progress"></div>
           </div>
-          ${reservation ? `<div class="notice success"><strong>${offer.status === "reserved" ? "A recipient has a temporary hold." : "Handoff reservation"}</strong> ${reservation.expires_at ? `Confirmation deadline: ${e(dateTime(reservation.expires_at))}.` : ""}</div>` : ""}
-          <div class="button-row"><button class="button quiet" id="refresh-status" type="button">Refresh now</button><button class="button secondary" id="new-offer" type="button">Start another offer</button></div>
-        </section>
-        ${workflowMap(state.data.map, "Reviewed rescue map")}
-        <section class="panel"><p class="kicker">Notification wave</p><h2>${candidates.filter((item) => item.notification_status === "sent").length || offer.notifications_count || 0} recipient updates</h2>
-          <p class="muted">Simulated in-app outreach only. Live staffing and capacity remain uncertain until confirmation.</p>
-          ${candidateList(candidates)}
-          ${demoAccess(state.demoRecipients, candidates, offer.current_wave)}
-        </section>
-        ${timelinePanel(events)}
-      </div>`;
-    workspace.querySelector("#refresh-status").addEventListener("click", loadDonorStatus);
-    workspace.querySelector("#new-offer").addEventListener("click", () => clearToken("donor", "donor"));
-    bindDemoRecipientButtons();
+          <p class="status-summary" data-region="summary"></p>
+          <div class="status-body">
+            <section class="status-recipients" aria-labelledby="status-recipients-title">
+              <h2 id="status-recipients-title">Food banks</h2>
+              <div data-region="recipients"></div>
+            </section>
+            <div class="status-map" data-region="map"></div>
+          </div>
+          <details class="status-more"><summary>Activity</summary><div data-region="activity"></div></details>
+          <details class="status-more" id="status-demo"><summary>Demo controls</summary><div data-region="demo"></div></details>
+          <div class="status-again" data-region="again"></div>
+        </section>`;
+      root = workspace.querySelector(".status-view");
+      root.addEventListener("click", (event) => {
+        if (event.target.closest("[data-status-new]")) clearToken("donor", "donor");
+      });
+    }
+    const story = statusStory(offer, candidates, reservation);
+    root.dataset.tone = story.tone;
+    const sentence = root.querySelector("#status-sentence");
+    if (sentence.textContent !== story.sentence) sentence.textContent = story.sentence;
+    statusPatch(root, "detail", story.detail);
+    statusPatch(root, "action", story.action ? `<button class="button primary" type="button" data-status-new>${e(story.action)}</button>` : "");
+    statusPatch(root, "progress", STATUS_STEPS.includes(offer.status) ? progress(offer.status) : "");
+    statusPatch(root, "summary", statusSummary(offer));
+    statusPatch(root, "recipients", statusRecipientRows(offer, candidates));
+    statusPatch(root, "map", workflowMap(state.data.map, "Pickup and nearby food banks"));
+    statusPatch(root, "activity", statusActivity(events, candidates));
+    statusPatch(root, "again", story.action ? "" : `<button class="status-link" type="button" data-status-new>Start another offer</button>`);
+    root.querySelector("#status-demo").hidden = !state.demoRecipients.length || !candidates.some((item) => item.notification_status === "sent");
+    if (statusPatch(root, "demo", demoAccess(state.demoRecipients, candidates, offer.current_wave))) bindDemoRecipientButtons();
+    statusCountdown();
     hydrateMaps();
+  }
+
+  function statusPatch(root, region, html) {
+    const element = root.querySelector(`[data-region="${region}"]`);
+    if (!element || statusRegionHtml.get(element) === html) return false;
+    statusRegionHtml.set(element, html);
+    element.innerHTML = html;
+    return true;
+  }
+
+  // One plain sentence answering "what's happening with my food right now?",
+  // plus one supporting line and, only when the offer is over, one action.
+  function statusStory(offer, candidates, reservation) {
+    const asked = candidates.filter((item) => item.notification_status === "sent");
+    const holderId = reservation?.recipient_id || offer.selected_recipient_id;
+    const holder = candidates.find((item) => item.recipient_id === holderId)?.name || "A food bank";
+    const reason = offer.outcome_reason ? ` Reason: ${offer.outcome_reason.trim().replace(/[^.!?]$/, "$&.")}` : "";
+    const again = "Post another offer";
+    switch (offer.status) {
+      case "notified": {
+        const count = offer.current_wave > 1 ? `asked ${asked.length} nearby food banks so far` : `${asked.length} nearby food bank${asked.length === 1 ? " was" : "s were"} asked`;
+        const more = candidates.some((item) => item.notification_status !== "sent");
+        const by = offer.wave_expires_at ? ` by ${statusTime(offer.wave_expires_at)}` : "";
+        return { tone: "active", sentence: `Finding a home — ${count}.`, detail: e(more ? `If no one says yes${by}, we'll ask the next closest.` : `Waiting for an answer${by}.`) };
+      }
+      case "reserved": {
+        const expires = reservation?.expires_at || offer.reservation_expires_at;
+        return { tone: "active", sentence: `${holder} is holding it.`, detail: expires ? `<span role="timer" data-status-expires="${e(expires)}"></span>` : "Waiting for them to confirm pickup." };
+      }
+      case "confirmed": {
+        const details = reservation?.confirmation_details || {};
+        const when = details.expected_handoff_time ? ` for ${statusTime(details.expected_handoff_time)}` : "";
+        const who = details.contact_name ? `${details.contact_name} from ${holder}` : holder;
+        const phone = details.contact_phone ? ` · <a href="tel:${e(details.contact_phone.replace(/[^\d+]/g, ""))}">${e(details.contact_phone)}</a>` : "";
+        return { tone: "done", sentence: `Pickup confirmed${when}.`, detail: `${e(who)} is coming${phone}` };
+      }
+      case "completed": {
+        const rescued = offer.completed_quantity_estimated !== false && offer.quantity_original ? offer.quantity_original : pallets(offer.completed_quantity ?? offer.quantity_pallets);
+        return { tone: "done", sentence: `Picked up. Thank you — ${rescued} rescued.`, detail: e(`Collected by ${holder}.`) };
+      }
+      case "needs_transport":
+        return { tone: "warn", sentence: "This one needs a driver first.", detail: "A coordinator is arranging transport. We'll ask nearby food banks as soon as that's sorted — nothing for you to do." };
+      case "no_match":
+        return { tone: "stop", sentence: "No nearby food bank could take it this time.", detail: "Everyone who could fit it was asked.", action: again };
+      case "expired":
+        return { tone: "stop", sentence: "The pickup window closed before anyone could collect it.", detail: "Nothing more will be sent for this offer.", action: again };
+      case "cancelled":
+        return { tone: "stop", sentence: "This offer was cancelled.", detail: e(`No food bank will be asked about it.${reason}`), action: again };
+      case "failed":
+        return { tone: "stop", sentence: "This pickup fell through.", detail: e(`A coordinator closed it.${reason}`), action: again };
+      default:
+        return { tone: "active", sentence: "Finding a home — choosing nearby food banks.", detail: "" };
+    }
+  }
+
+  function statusSummary(offer) {
+    return [
+      offer.description_structured || offer.description_original || offer.description || "Food offer",
+      offer.quantity_original || pallets(offer.quantity_pallets),
+      STORAGE_LABELS[offer.storage_state] || title(offer.storage_state),
+      `Gone by ${statusTime(offer.deadline || offer.pickup_deadline)}`,
+    ].filter(Boolean).map((part, index, parts) => {
+      // The separator trails each item so a wrapped line never starts with it.
+      const dot = index < parts.length - 1 ? `<span class="status-dot" aria-hidden="true"> ·</span>` : "";
+      return index ? `<span class="status-part">${e(part)}${dot}</span>` : `<strong>${e(part)}</strong>${dot}`;
+    }).join(" ");
+  }
+
+  function statusRecipientRows(offer, candidates) {
+    const asked = candidates.filter((item) => item.notification_status === "sent");
+    if (!asked.length) {
+      const empty = { needs_transport: "None asked yet — waiting on a driver.", no_match: "None nearby could take this amount." }[offer.status] || (TERMINAL.has(offer.status) ? "No food banks were asked." : "Choosing who to ask…");
+      return `<p class="status-empty">${e(empty)}</p>`;
+    }
+    const order = { holding: 0, won: 0, pending: 1 };
+    const rows = [...asked].sort((a, b) => (order[a.response] ?? 2) - (order[b.response] ?? 2));
+    return `<ul class="status-rows">${rows.map((item) => {
+      const [label, tone] = statusRecipientState(item.response, offer.status);
+      return `<li><span>${e(item.name || item.recipient_id || "Food bank")}</span><span class="status-state" data-tone="${tone}">${e(label)}</span></li>`;
+    }).join("")}</ul>`;
+  }
+
+  function statusRecipientState(response, offerStatus) {
+    if (response === "won") return offerStatus === "completed" ? ["Picked up", "done"] : ["Confirmed", "done"];
+    return ({
+      pending: ["Asked", "active"],
+      holding: ["Holding", "hold"],
+      declined: ["Declined", "off"],
+      timed_out: ["Didn't reply", "off"],
+      hold_expired: ["Didn't confirm", "off"],
+      invalidated: ["No longer needed", "off"],
+    })[response] || ["Asked", "active"];
+  }
+
+  // Plain-language version of the shared timeline for donors.
+  function statusActivity(events, candidates) {
+    if (!events.length) return `<p class="status-empty">Nothing yet.</p>`;
+    const nameOf = (id) => candidates.find((item) => item.recipient_id === id)?.name || "A food bank";
+    const text = (event) => {
+      const who = nameOf(event.actor_id);
+      const asked = /(\d+)/.exec(event.text || "")?.[1];
+      return ({
+        offer_submitted: "You posted the offer.",
+        transport_needed: "Waiting for a driver before asking food banks.",
+        wave_notified: asked ? `Asked ${asked} nearby food bank${asked === "1" ? "" : "s"}.` : "Asked nearby food banks.",
+        candidate_declined: `${who} said no.`,
+        offer_held: `${who} put a hold on it.`,
+        reservation_expired: "The hold ran out.",
+        handoff_confirmed: `${who} confirmed pickup.`,
+        handoff_completed: `${who} picked it up.`,
+        no_match: "No one else nearby to ask.",
+        offer_expired: "The pickup window closed.",
+        offer_cancelled: "A coordinator cancelled the offer.",
+        offer_failed: "A coordinator closed the offer.",
+      })[event.type] || event.display_text || event.text || "Offer updated.";
+    };
+    return `<ol class="status-activity">${[...events].reverse().map((event) => `<li><span>${e(text(event))}</span><time datetime="${e(event.timestamp || "")}">${e(statusTime(event.timestamp || event.created_at))}</time></li>`).join("")}</ol>`;
+  }
+
+  function statusTime(value) {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    const time = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
+    if (date.toDateString() === new Date().toDateString()) return time;
+    return `${new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(date)}, ${time}`;
+  }
+
+  function statusCountdown() {
+    const element = workspace.querySelector("[data-status-expires]");
+    if (state.countdownTimer) window.clearInterval(state.countdownTimer);
+    state.countdownTimer = null;
+    if (!element) return;
+    const update = () => {
+      const remaining = Math.max(0, new Date(element.dataset.statusExpires).getTime() - Date.now());
+      const minutes = Math.floor(remaining / 60000);
+      const seconds = Math.floor((remaining % 60000) / 1000);
+      element.textContent = remaining > 0 ? `${minutes}:${String(seconds).padStart(2, "0")} left for them to confirm pickup.` : "Their hold ran out — asking the others again.";
+      if (!remaining && state.countdownTimer) {
+        window.clearInterval(state.countdownTimer);
+        state.countdownTimer = null;
+      }
+    };
+    update();
+    state.countdownTimer = window.setInterval(update, 1000);
   }
 
   function demoAccess(access, candidates, currentWave) {
@@ -703,7 +872,7 @@
     const currentIds = new Set(candidates.filter((item) => item.wave === currentWave && item.notification_status === "sent").map((item) => item.recipient_id));
     const currentAccess = access.filter((item) => currentIds.has(item.recipient_id));
     const visible = currentAccess.length ? currentAccess : access.slice(0, 3);
-    return `<div class="demo-access"><p class="kicker">Current-wave demo inboxes</p>${visible.map((item, index) => `<button class="button secondary wide demo-recipient" data-index="${access.indexOf(item)}" type="button">Open ${e(item.name || item.recipient_id || `recipient ${index + 1}`)} <span aria-hidden="true">↗</span></button>`).join("")}<small>Each button opens the selected simulated recipient inbox directly.</small></div>`;
+    return `<p class="status-demo-note">Open a food bank's inbox in a new tab to hold, confirm, or decline.</p><div class="option-row">${visible.map((item, index) => `<button class="option demo-recipient" data-index="${access.indexOf(item)}" type="button">${e(item.name || item.recipient_id || `Recipient ${index + 1}`)} <span aria-hidden="true">↗</span></button>`).join("")}</div>`;
   }
 
   function bindDemoRecipientButtons() {
