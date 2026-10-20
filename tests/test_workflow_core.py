@@ -364,6 +364,40 @@ def test_concurrent_first_accept_wins_without_duplicate_capacity():
     assert sum(r["reserved_pallets"] for r in state["recipients"].values()) == 1
 
 
+def test_repeat_claim_by_current_holder_returns_existing_hold():
+    """A double tap on "take it" sends a second claim with a fresh idempotency
+    key; the holder must get its hold back, not "This action is no longer valid"."""
+    service, repo, _ = workflow()
+    created = create(service)
+    offer_id = created["offer_id"]
+    holder, other = created["recipient_access"][:2]
+    first = service.claim(offer_id, holder["token"], {}, idempotency_key="tap-1", now=NOW)
+    again = service.claim(offer_id, holder["token"], {}, idempotency_key="tap-2", now=NOW + timedelta(seconds=2))
+
+    assert again["status"] == "reserved"
+    assert again["reservation"]["reservation_id"] == first["reservation"]["reservation_id"]
+    assert again["reservation"]["expires_at"] == first["reservation"]["expires_at"]
+    state = repo.snapshot()
+    assert state["offers"][offer_id]["lease_version"] == 1
+    assert state["recipients"][holder["recipient_id"]]["reserved_pallets"] == 1
+    assert sum(1 for r in state["reservations"].values() if r["status"] == "active") == 1
+
+    with pytest.raises(WorkflowError) as rival:
+        service.claim(offer_id, other["token"], {}, idempotency_key="rival", now=NOW + timedelta(seconds=3))
+    assert rival.value.code == "offer_currently_held"
+
+    service.confirm(
+        first["reservation"]["reservation_id"],
+        holder["token"],
+        {"expected_handoff_time": (NOW + timedelta(hours=1)).isoformat(), "contact_name": "Maria", "contact_phone": "404-555-0182"},
+        idempotency_key="confirm",
+        now=NOW + timedelta(minutes=1),
+    )
+    with pytest.raises(WorkflowError) as closed:
+        service.claim(offer_id, holder["token"], {}, idempotency_key="tap-3", now=NOW + timedelta(minutes=2))
+    assert closed.value.code == "candidate_response_closed"
+
+
 def test_two_offers_cannot_overbook_same_recipient():
     service, repo, _ = workflow()
     first = create(service, "first", quantity=5)

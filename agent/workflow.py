@@ -988,6 +988,12 @@ class WorkflowService:
             candidate = offer["candidates"].get(rid)
             if not candidate or not candidate["eligible"] or candidate.get("wave") != offer["current_wave"]:
                 raise WorkflowError("candidate_not_eligible", "Recipient is not eligible in the current wave.", status_code=403)
+            held = state["reservations"].get(offer.get("active_reservation_id"))
+            if candidate["response"] == "holding" and held and held["recipient_id"] == rid and held["status"] == "active":
+                # A second tap on "take it" (new idempotency key) by the pantry
+                # that already holds the offer is the same intent: return the
+                # existing hold instead of an error, without a new lease.
+                return {"offer_id": offer_id, "status": offer["status"], "reservation": held, "_tasks": []}
             if candidate["response"] != "pending":
                 raise WorkflowError("candidate_response_closed", "This action is no longer valid.", status_code=409)
             if offer.get("active_reservation_id"):
