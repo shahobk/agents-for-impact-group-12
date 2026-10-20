@@ -278,6 +278,59 @@ def test_full_http_offer_hold_confirm_complete_and_role_authorization(api):
     }
 
 
+def test_handoff_reply_parsing_requires_the_notified_recipient_and_never_confirms(api, monkeypatch):
+    client, repo, _ = api
+    seen = {}
+
+    async def handoff_provider(text, now, deadline):
+        seen.update(text=text, deadline=deadline)
+        return {
+            "draft": {
+                "contact_name": "Maria",
+                "contact_phone": "404-555-0182",
+                "expected_handoff_time": (now + timedelta(hours=1)).isoformat(),
+            }
+        }
+
+    monkeypatch.setattr(
+        service, "intake_interpreter", IntakeInterpreter(handoff_provider=handoff_provider)
+    )
+    created = client.post("/api/offers", json=payload(), headers={"X-Idempotency-Key": "handoff-offer"}).json()
+    recipient = created["recipient_access"][0]
+    body = {"text": "Maria, around 6:30, 404-555-0182", "offer_id": created["offer_id"]}
+
+    assert client.post("/api/intake/handoff", json=body).status_code == 401
+    donor = client.post(
+        "/api/intake/handoff", json=body, headers={"Authorization": f"Bearer {created['status_token']}"}
+    )
+    assert donor.status_code == 403
+    other = client.post(
+        "/api/intake/handoff",
+        json={**body, "offer_id": "another-offer"},
+        headers={"Authorization": f"Bearer {recipient['token']}"},
+    )
+    assert other.status_code == 403
+    assert client.post(
+        "/api/intake/handoff",
+        json={**body, "contact_name": "extra"},
+        headers={"Authorization": f"Bearer {recipient['token']}"},
+    ).status_code == 422
+
+    response = client.post(
+        "/api/intake/handoff", json=body, headers={"Authorization": f"Bearer {recipient['token']}"}
+    )
+    assert response.status_code == 200
+    result = response.json()
+    assert result["provider"] == "gemini"
+    assert result["draft"]["contact_name"] == "Maria"
+    assert result["draft"]["contact_phone"] == "404-555-0182"
+    assert result["questions"] == []
+    assert seen["deadline"].isoformat() == repo.snapshot()["offers"][created["offer_id"]]["deadline"].replace("Z", "+00:00")
+    # Parsing is advisory: nothing is held or confirmed.
+    assert repo.snapshot()["offers"][created["offer_id"]]["status"] == "notified"
+    assert repo.snapshot()["reservations"] == {}
+
+
 def test_task_endpoint_rejects_anonymous_and_accepts_configured_local_test_secret(api):
     client, repo, scheduler = api
     noop = client.post(

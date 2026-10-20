@@ -887,17 +887,28 @@
     }));
   }
 
+  // Recipient inbox: one card, one step at a time (offer -> hold & confirm -> pick up).
+  // The pantry replies in its own words; the agent fills in the confirmation.
+  const RECIPIENT_CONTACT_KEY = "pantry-relay:recipient-contact";
+  const RECIPIENT_FIELDS = ["contact_name", "contact_phone", "expected_handoff_time"];
+  const RECIPIENT_LABELS = { contact_name: "Picking up", contact_phone: "Phone", expected_handoff_time: "Arriving" };
+  const RECIPIENT_DECLINE_REASONS = ["No space", "No transport", "No staff", "Not today"];
+
   function renderRecipient() {
     if (!state.token) return renderMissingContext("recipient");
-    workspace.innerHTML = loadingView("Loading simulated inbox…");
+    state.handoff = null;
+    state.recipientView = "";
+    state.recipientStage = "";
+    workspace.innerHTML = loadingView("Loading your offers…");
     loadRecipient();
   }
 
   async function loadRecipient() {
     try {
       state.data = await api("/api/recipients/notifications");
+      if (state.role !== "recipient") return;
       const notices = arrayOf(state.data.notifications);
-      if (!state.selectedOfferId && notices[0]) state.selectedOfferId = notices[0].offer_id || notices[0].offer?.offer_id;
+      if (!notices.some((item) => recipientOfferId(item) === state.selectedOfferId)) state.selectedOfferId = notices[0] ? recipientOfferId(notices[0]) : "";
       drawRecipient();
       if (!notices.length || notices.some((item) => !TERMINAL.has(item.offer?.status || item.status))) startPolling(loadRecipient);
     } catch (err) {
@@ -906,115 +917,505 @@
     }
   }
 
-  function currentNotification() {
+  function recipientOfferId(item) { return item?.offer_id || item?.offer?.offer_id || ""; }
+
+  function recipientCurrent() {
     const notices = arrayOf(state.data?.notifications);
-    return notices.find((item) => (item.offer_id || item.offer?.offer_id) === state.selectedOfferId) || notices[0];
+    return notices.find((item) => recipientOfferId(item) === state.selectedOfferId) || notices[0];
+  }
+
+  function recipientReservation(item) {
+    if (item.reservation) return item.reservation;
+    return state.reservation?.offer_id === recipientOfferId(item) ? state.reservation : null;
+  }
+
+  function recipientStage(item) {
+    const status = item.offer?.status;
+    const response = item.response || "pending";
+    if (response === "won" && status === "completed") return "done";
+    if (response === "won" || (status === "confirmed" && recipientReservation(item)?.status === "confirmed")) return "confirmed";
+    if (response === "holding" && recipientReservation(item)) return "holding";
+    if (response === "pending" && status === "notified") return "offer";
+    if (response === "pending" && status === "reserved") return "waiting";
+    return "closed";
   }
 
   function drawRecipient() {
     const notices = arrayOf(state.data.notifications);
-    const current = currentNotification();
-    const single = notices.length === 1;
-    workspace.innerHTML = `
-      ${pageLead("Simulated recipient inbox", `Welcome, ${e(state.data.recipient?.name || "rescue partner")}.`, "Review one urgent offer. Live capacity, staffing, and transport still need your confirmation.")}
-      <div class="inbox-layout ${single ? "single-offer" : ""}">
-        ${single ? "" : `<section class="panel inbox-list"><div class="section-heading"><div><p class="kicker">Offers needing a response</p><h2>${notices.length} offers</h2></div><button id="leave-recipient" class="button quiet" type="button">Leave inbox</button></div>
-          ${notices.length ? notices.map(notificationCard).join("") : emptyState("No active notifications", "A new wave will appear here when an eligible offer is available.")}
-        </section>`}
-        <section class="panel offer-detail" id="offer-detail">${current ? recipientDetail(current) : emptyState("Choose an offer", "Select a notification to review its safety and logistics evidence.")}</section>
-      </div>`;
-    workspace.querySelector("#leave-recipient")?.addEventListener("click", () => clearToken("recipient"));
-    workspace.querySelectorAll(".notification-card").forEach((button) => button.addEventListener("click", () => {
-      state.selectedOfferId = button.dataset.offerId;
+    const current = recipientCurrent();
+    const stage = current ? recipientStage(current) : "empty";
+    const reservation = current ? recipientReservation(current) : null;
+    // Polling redraws every few seconds; only rebuild when something visible
+    // changed, so a half-typed reply, open editor, or note is never wiped.
+    const signature = JSON.stringify([notices.map((item) => [recipientOfferId(item), item.response, item.offer?.status]), state.selectedOfferId, stage, reservation?.reservation_id, reservation?.status, Boolean(current?.offer?.donor_location)]);
+    if (signature === state.recipientView && workspace.querySelector(".recipient-inbox")) return;
+    const stageKey = `${state.selectedOfferId}:${stage}`;
+    const moved = Boolean(state.recipientStage) && state.recipientStage !== stageKey;
+    state.recipientView = signature;
+    state.recipientStage = stageKey;
+    if (stage === "holding" && (!state.handoff || state.handoff.reservationId !== reservation.reservation_id)) state.handoff = recipientFreshReply(current, reservation);
+    const name = state.data.recipient?.name;
+    workspace.innerHTML = `<div class="recipient-inbox">
+      ${name ? `<p class="recipient-hello">For ${e(name)}</p>` : ""}
+      ${notices.length > 1 ? recipientList(notices) : ""}
+      ${current ? recipientCard(current, stage) : `<article class="recipient-card">${emptyState("No offers right now", "When food that fits your pantry comes up, it shows here.")}</article>`}
+    </div>`;
+    workspace.querySelectorAll("[data-pick-offer]").forEach((button) => button.addEventListener("click", () => {
+      state.selectedOfferId = button.dataset.pickOffer;
       drawRecipient();
     }));
-    bindRecipientActions(current);
+    if (current) bindRecipientActions(current, stage);
     hydrateMaps();
+    if (moved) workspace.querySelector("#recipient-heading")?.focus();
   }
 
-  function notificationCard(item) {
-    const offer = item.offer || item;
-    const id = item.offer_id || offer.offer_id || "";
-    const active = id === state.selectedOfferId;
-    return `<button type="button" class="notification-card ${active ? "active" : ""}" data-offer-id="${e(id)}" aria-pressed="${active}"><span>${e(item.title || offer.description || "Food rescue offer")}</span><small>${e(responseLabel(item.response || offer.response))} · ${e(dateTime(item.deadline || offer.deadline))}</small></button>`;
+  function recipientList(notices) {
+    const tags = { offer: "New", waiting: "Held by another pantry", holding: "Held for you", confirmed: "Confirmed", done: "Picked up", closed: "Closed" };
+    return `<nav class="recipient-list" aria-label="Your offers">${notices.map((item) => {
+      const id = recipientOfferId(item);
+      const active = id === state.selectedOfferId;
+      return `<button type="button" class="recipient-list-item${active ? " active" : ""}" data-pick-offer="${e(id)}" aria-pressed="${active}"><span>${e(recipientHeadline(item))}</span><small>${e(tags[recipientStage(item)])} · gone by ${e(recipientClock(item.offer?.deadline || item.deadline))}</small></button>`;
+    }).join("")}</nav>`;
   }
 
-  function recipientDetail(item) {
-    const offer = item.offer || item;
-    const offerId = item.offer_id || offer.offer_id;
-    const response = item.response || offer.response || "pending";
-    const reservation = item.reservation || offer.reservation || state.reservation;
-    const status = offer.status || (response === "holding" ? "reserved" : "notified");
-    const canRespond = response === "pending" && !["reserved", "confirmed", "completed"].includes(status);
-    const canConfirm = response === "holding" || (status === "reserved" && reservation);
-    const canComplete = response === "won" || status === "confirmed";
-    const donorLocation = offer.donor_location || offer.map?.donor;
-    return `<div class="section-heading"><div><p class="kicker">Offer ${e(shortId(offerId))}</p><h2>Can you rescue ${e(offer.quantity_original || pallets(offer.quantity_pallets))}?</h2></div>${statusPill(status)}</div>
-      <p class="offer-name">${e(offer.description || item.title || "Food rescue offer")}</p>
-      <p>${e(item.message || "Your operation passed deterministic storage, quantity, route, and deadline checks.")}</p>
-      <div class="fact-grid compact-facts">
-        ${fact("Quantity", offer.quantity_original || pallets(offer.quantity_pallets))}
-        ${fact("Storage", title(offer.storage_state))}
-        ${fact("Distance", offer.distance_miles == null ? "Route estimate pending" : `${formatNumber(offer.distance_miles)} mi estimated`)}
-        ${fact("Deadline", dateTime(offer.deadline))}
-        ${fact("Transport", transportLabel(offer.transport_mode))}
-        ${fact("Response", responseLabel(response))}
+  function recipientCard(item, stage) {
+    const offer = item.offer || {};
+    const mapTitle = offer.donor_location ? "Pickup spot" : "Exact pickup spot shared once you say yes";
+    const map = ["done", "closed", "waiting"].includes(stage) ? "" : `<div class="recipient-map">${workflowMap(offer.map, mapTitle)}</div>`;
+    const body = { offer: recipientOfferStep, holding: recipientHoldStep, confirmed: recipientConfirmedStep, done: recipientDoneStep }[stage] || recipientClosedStep;
+    return `<article class="recipient-card" data-stage="${e(stage)}" aria-labelledby="recipient-heading"><div class="recipient-main">${body(item)}</div>${map}</article>`;
+  }
+
+  function recipientOfferStep(item) {
+    const offer = item.offer || {};
+    const needs = recipientNeeds(offer);
+    return `<h1 id="recipient-heading" tabindex="-1">${e(recipientHeadline(item))}</h1>
+      <p class="recipient-meta">${e(recipientMeta(offer))}</p>
+      ${needs ? `<p class="recipient-needs">${e(needs)}</p>` : ""}
+      <div class="recipient-actions">
+        <button class="button primary recipient-primary" data-action="claim" type="button">Yes, we'll take it</button>
+        <button class="button quiet" data-action="decline-open" type="button" aria-expanded="false" aria-controls="decline-reasons">Not this time</button>
       </div>
-      <div class="map-card" aria-label="Pickup location summary"><span class="map-pin" aria-hidden="true"></span><div><strong>${e(locationLabel(donorLocation) || "Exact pickup point is hidden")}</strong><small>${donorLocation ? "Available because this recipient has a valid claim." : "Exact coordinates unlock only after a valid claim. Route values may use approximate ZIP-centroid data."}</small></div></div>
-      ${workflowMap(offer.map, "Recipient route context")}
-      <div class="notice warning"><strong>Live-capacity check:</strong> Confirm current space, staffing, and cold-chain transport before the handoff.</div>
-      ${canRespond ? `<div class="action-block"><h3>Can your team safely receive the full offer?</h3><div class="button-row"><button class="button primary" data-action="claim" type="button">Hold for 10 minutes</button><button class="button secondary" data-action="decline" type="button">Decline</button></div></div>` : ""}
-      ${canConfirm ? confirmForm(offerId, reservation) : ""}
-      ${canComplete ? completeForm(offerId) : ""}
-      ${!canRespond && !canConfirm && !canComplete ? `<div class="notice neutral">This action is ${e(responseLabel(response).toLowerCase())}. Refreshing cannot replay an invalidated action.</div>` : ""}`;
+      <p class="recipient-fine">We'll hold it for you for 10 minutes while you sort out pickup.</p>
+      <fieldset id="decline-reasons" class="recipient-decline question" hidden><legend>What's in the way? (optional)</legend><div class="option-row">${RECIPIENT_DECLINE_REASONS.map((reason) => `<button type="button" class="option" data-decline="${e(reason)}">${e(reason)}</button>`).join("")}<button type="button" class="option other" data-decline="">Just pass</button></div></fieldset>`;
   }
 
-  function confirmForm(offerId, reservation) {
+  function recipientHoldStep(item) {
+    const offer = item.offer || {};
+    const reservation = recipientReservation(item);
     const id = reservation?.reservation_id || reservation?.id || "";
-    const defaultTime = new Date(Date.now() + 60 * 60 * 1000);
-    defaultTime.setMinutes(defaultTime.getMinutes() - defaultTime.getTimezoneOffset());
-    return `<form id="confirm-form" class="action-block" data-offer-id="${e(offerId)}" data-reservation-id="${e(id)}"><h3>Confirm within the hold</h3>${reservation?.expires_at ? `<p class="countdown" data-expires="${e(reservation.expires_at)}">Hold expires ${e(dateTime(reservation.expires_at))}</p>` : ""}
-      <div class="field"><label for="handoff-time">Expected handoff time</label><input id="handoff-time" name="expected_handoff_time" type="datetime-local" value="${defaultTime.toISOString().slice(0, 16)}" required /></div>
-      <div class="form-grid"><div class="field"><label for="contact-name">Contact name</label><input id="contact-name" name="contact_name" required autocomplete="name" /></div><div class="field"><label for="contact-phone">Contact phone</label><input id="contact-phone" name="contact_phone" required autocomplete="tel" type="tel" /></div></div>
-      <label class="review-check"><input name="capacity_ack" type="checkbox" required /><span><strong>Current capacity and safe transport are available.</strong><small>Expected handoff must be after now and no later than the donor deadline.</small></span></label>
-      <button class="button primary wide" type="submit" ${id ? "" : "disabled"}>Confirm handoff</button>${id ? "" : `<p class="notice danger">Reservation identifier unavailable. Refresh the inbox before confirming.</p>`}</form>`;
+    return `<h1 id="recipient-heading" class="recipient-heading-small" tabindex="-1">${e(recipientHeadline(item))}</h1>
+      <p class="recipient-meta">${e(recipientMeta(offer))}</p>
+      ${reservation?.expires_at ? `<div class="recipient-timer"><span class="recipient-timer-digits" role="timer" aria-label="Time left to confirm" data-recipient-expires="${e(reservation.expires_at)}">10:00</span><span class="recipient-timer-label">It's held for you. Confirm before the timer runs out.</span><span id="recipient-timer-announce" class="visually-hidden" aria-live="polite"></span></div>` : ""}
+      <div class="recipient-reply">
+        <label for="handoff-text">Who's picking it up, when, and a phone number?</label>
+        <textarea id="handoff-text" rows="2" placeholder="Maria, around 6:30, 404-555-0182" autocomplete="off"></textarea>
+        <p id="handoff-parse" class="parse-state" role="status" aria-live="polite"></p>
+      </div>
+      <div id="handoff-result" class="recipient-chips"></div>
+      <div class="recipient-confirm">
+        <p class="recipient-ready"><span aria-hidden="true">✓</span> ${e(recipientReady(offer))}</p>
+        <button class="button primary recipient-primary" id="confirm-pickup" type="button" data-reservation-id="${e(id)}" aria-describedby="confirm-hint">Confirm pickup</button>
+        <p id="confirm-hint" class="recipient-fine">${id ? "" : "Refresh the page before confirming."}</p>
+      </div>`;
   }
 
-  function completeForm(offerId) {
-    return `<form id="complete-form" class="action-block" data-offer-id="${e(offerId)}"><h3>Record completed handoff</h3><div class="form-grid"><div class="field"><label for="actual-quantity">Actual pallets (optional)</label><input id="actual-quantity" name="actual_quantity_pallets" type="number" min="0" step="0.1" /></div><div class="field"><label for="completion-note">Handoff note (optional)</label><input id="completion-note" name="note" /></div></div><button class="button primary wide" type="submit">Mark handoff complete</button></form>`;
+  function recipientConfirmedStep(item) {
+    const offer = item.offer || {};
+    const details = recipientReservation(item)?.confirmation_details || {};
+    const place = offer.donor_location;
+    const hasPoint = place && Number.isFinite(Number(place.latitude)) && Number.isFinite(Number(place.longitude));
+    const directions = hasPoint ? `https://www.google.com/maps/dir/?api=1&destination=${Number(place.latitude)},${Number(place.longitude)}` : "";
+    const contact = [details.contact_name, details.contact_phone].filter(Boolean).join(" · ");
+    return `<p class="recipient-badge"><span aria-hidden="true">✓</span> Pickup confirmed</p>
+      <h1 id="recipient-heading" tabindex="-1">${details.expected_handoff_time ? `Pick up at ${e(recipientClock(details.expected_handoff_time))}` : "You're picking this up"}</h1>
+      <p class="recipient-meta">${e(recipientHeadline(item))}${contact ? ` · ${e(contact)}` : ""}</p>
+      <div class="recipient-where">
+        <div><small>Pickup address</small><strong>${e(locationLabel(place) || "Shared with you once confirmed")}</strong></div>
+        ${directions ? `<a class="button secondary" href="${e(directions)}" target="_blank" rel="noopener noreferrer">Directions <span aria-hidden="true">↗</span></a>` : ""}
+      </div>
+      <form id="complete-form" class="recipient-complete" data-offer-id="${e(recipientOfferId(item))}">
+        <details class="recipient-note"><summary>Add a note</summary>
+          <div class="recipient-note-fields"><label for="actual-quantity">How much did you get? (pallets, optional)</label><input id="actual-quantity" name="actual_quantity_pallets" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="${e(formatNumber(offer.quantity_pallets))}" />
+          <label for="completion-note">Note (optional)</label><input id="completion-note" name="note" maxlength="1000" placeholder="e.g. 2 crates were damaged" /></div>
+        </details>
+        <button class="button primary recipient-primary" type="submit">Picked up ✓</button>
+      </form>`;
   }
 
-  function bindRecipientActions(current) {
-    if (!current) return;
-    startCountdown();
-    const offerId = current.offer_id || current.offer?.offer_id;
-    workspace.querySelector("[data-action=claim]")?.addEventListener("click", async (event) => mutateButton(event.currentTarget, `/api/offers/${encodeURIComponent(offerId)}/claim`, {}, (result) => {
-      state.reservation = result.reservation;
-      showToast("Temporary hold created. Confirm before it expires.");
-      loadRecipient();
+  function recipientDoneStep(item) {
+    return `<p class="recipient-badge"><span aria-hidden="true">✓</span> Picked up</p>
+      <h1 id="recipient-heading" tabindex="-1">Thank you. That food has a home.</h1>
+      <p class="recipient-meta">${e(recipientHeadline(item))}</p>`;
+  }
+
+  function recipientClosedStep(item) {
+    const response = item.response || "pending";
+    const [heading, copy] = recipientStage(item) === "waiting"
+      ? ["Another pantry is holding this right now.", "If they let it go, it comes back here."]
+      : ({
+        declined: ["You passed on this one.", "No problem. We'll keep sending offers that fit."],
+        hold_expired: ["The hold ran out.", "It was offered to the next pantry."],
+        invalidated: ["Another pantry is picking this one up.", "Thanks for being ready."],
+      })[response] || ["This offer has closed.", "We'll let you know when the next one fits."];
+    return `<h1 id="recipient-heading" class="recipient-heading-small" tabindex="-1">${e(heading)}</h1>
+      <p class="recipient-meta">${e(recipientHeadline(item))}</p>
+      <p class="recipient-fine">${e(copy)}</p>`;
+  }
+
+  function recipientHeadline(item) {
+    const offer = item.offer || {};
+    let food = String(offer.description || item.title || "Food rescue offer").trim().split(/(?<=[.!?])\s/)[0].replace(/[.!?]+$/, "");
+    const amount = offer.quantity_original || (offer.quantity_pallets == null ? "" : pallets(offer.quantity_pallets));
+    if (amount && !food.toLowerCase().includes(String(amount).toLowerCase())) food = `${amount} · ${food}`;
+    return food.charAt(0).toUpperCase() + food.slice(1);
+  }
+
+  function recipientMeta(offer) {
+    return [offer.distance_miles == null ? "" : `${formatNumber(offer.distance_miles)} mi away`, offer.deadline ? `gone by ${recipientClock(offer.deadline)}` : ""].filter(Boolean).join(" · ");
+  }
+
+  function recipientNeeds(offer) {
+    const storage = { refrigerated: "cold storage", frozen: "freezer space" }[offer.storage_state];
+    const transport = { recipient_pickup: "your own transport", transportation_needed: "a driver" }[offer.transport_mode];
+    const delivered = offer.transport_mode === "donor_delivery" ? " The donor delivers." : "";
+    if (storage && transport) return `Needs ${storage} and ${transport}.`;
+    if (storage || transport) return `Needs ${storage || transport}.${delivered}`;
+    return delivered.trim();
+  }
+
+  function recipientReady(offer) {
+    const storage = { refrigerated: "cold storage", frozen: "freezer space" }[offer.storage_state] || "room for it";
+    const transport = offer.transport_mode === "donor_delivery" ? "someone to receive it" : "transport";
+    return `We have ${storage} and ${transport} ready.`;
+  }
+
+  function recipientClock(value) {
+    const date = new Date(value);
+    if (!value || Number.isNaN(date.getTime())) return "—";
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).formatToParts(date).map((part) => [part.type, part.value]));
+    const time = `${parts.hour}${parts.minute === "00" ? "" : `:${parts.minute}`} ${String(parts.dayPeriod || "").toLowerCase()}`.trim();
+    const today = new Date();
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    if (date.toDateString() === today.toDateString()) return time;
+    if (date.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
+    return `${time} ${new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(date)}`;
+  }
+
+  function readRecipientContact() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(RECIPIENT_CONTACT_KEY)) || {};
+      return { contact_name: typeof saved.contact_name === "string" ? saved.contact_name : "", contact_phone: typeof saved.contact_phone === "string" ? saved.contact_phone : "" };
+    } catch (_err) { return { contact_name: "", contact_phone: "" }; }
+  }
+
+  function recipientFreshReply(item, reservation) {
+    const saved = readRecipientContact();
+    const draft = { contact_name: saved.contact_name || null, contact_phone: saved.contact_phone || null, expected_handoff_time: null };
+    return {
+      reservationId: reservation.reservation_id,
+      offerId: recipientOfferId(item),
+      deadline: item.offer?.deadline || item.deadline || "",
+      text: "",
+      draft,
+      confidence: {},
+      saved: new Set(RECIPIENT_FIELDS.filter((field) => hasValue(draft[field]))),
+      edited: new Set(),
+      answered: new Set(),
+      questions: [],
+      editing: "",
+      seq: 0,
+      parsed: false,
+    };
+  }
+
+  function bindRecipientActions(current, stage) {
+    const offerId = recipientOfferId(current);
+    const claim = workspace.querySelector("[data-action=claim]");
+    claim?.addEventListener("click", async () => {
+      const result = await mutateButton(claim, `/api/offers/${encodeURIComponent(offerId)}/claim`, {}, (held) => {
+        state.reservation = held.reservation;
+        loadRecipient();
+      });
+      if (!result) loadRecipient();
+    });
+    const declineOpen = workspace.querySelector("[data-action=decline-open]");
+    declineOpen?.addEventListener("click", () => {
+      const reasons = workspace.querySelector("#decline-reasons");
+      reasons.hidden = !reasons.hidden;
+      declineOpen.setAttribute("aria-expanded", String(!reasons.hidden));
+      if (!reasons.hidden) reasons.querySelector(".option")?.focus();
+    });
+    workspace.querySelectorAll("[data-decline]").forEach((button) => button.addEventListener("click", () => {
+      workspace.querySelectorAll("[data-decline]").forEach((other) => { if (other !== button) other.disabled = true; });
+      mutateButton(button, `/api/offers/${encodeURIComponent(offerId)}/decline`, { reason: button.dataset.decline }, () => {
+        showToast("Got it. We'll offer it to the next pantry.");
+        loadRecipient();
+      }).finally(() => workspace.querySelectorAll("[data-decline]").forEach((other) => { other.disabled = false; }));
     }));
-    workspace.querySelector("[data-action=decline]")?.addEventListener("click", async (event) => {
-      const reason = window.prompt("Optional decline reason (do not include sensitive information):", "Insufficient current capacity");
-      if (reason === null) return;
-      mutateButton(event.currentTarget, `/api/offers/${encodeURIComponent(offerId)}/decline`, { reason }, () => { showToast("Offer declined."); loadRecipient(); });
-    });
-    workspace.querySelector("#confirm-form")?.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const form = event.currentTarget;
-      if (!form.reportValidity()) return;
-      const data = new FormData(form);
-      const payload = { expected_handoff_time: new Date(String(data.get("expected_handoff_time"))).toISOString(), contact_name: String(data.get("contact_name")).trim(), contact_phone: String(data.get("contact_phone")).trim() };
-      mutateButton(form.querySelector("[type=submit]"), `/api/reservations/${encodeURIComponent(form.dataset.reservationId)}/confirm`, payload, () => { showToast("Handoff confirmed."); loadRecipient(); });
-    });
-    workspace.querySelector("#complete-form")?.addEventListener("submit", async (event) => {
+    if (stage === "holding") bindRecipientReply();
+    workspace.querySelector("#complete-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const data = new FormData(form);
-      const quantity = data.get("actual_quantity_pallets");
+      const quantity = String(data.get("actual_quantity_pallets") || "").trim();
       const payload = { note: String(data.get("note") || "").trim() };
       if (quantity !== "") payload.actual_quantity_pallets = Number(quantity);
-      mutateButton(form.querySelector("[type=submit]"), `/api/offers/${encodeURIComponent(form.dataset.offerId)}/complete`, payload, () => { showToast("Handoff completed and impact recorded."); loadRecipient(); });
+      mutateButton(form.querySelector("[type=submit]"), `/api/offers/${encodeURIComponent(form.dataset.offerId)}/complete`, payload, () => { showToast("Marked as picked up. Thank you!"); loadRecipient(); });
     });
+  }
+
+  function bindRecipientReply() {
+    const reply = state.handoff;
+    const input = workspace.querySelector("#handoff-text");
+    input.value = reply.text;
+    input.addEventListener("input", () => {
+      window.clearTimeout(state.parseTimer);
+      state.parseTimer = window.setTimeout(recipientParse, 900);
+    });
+    input.addEventListener("blur", () => recipientParse());
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); recipientParse(); }
+    });
+    const panel = workspace.querySelector("#handoff-result");
+    panel.addEventListener("click", onRecipientReplyClick);
+    panel.addEventListener("submit", onRecipientReplySubmit);
+    panel.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && state.handoff.editing) { state.handoff.editing = ""; recipientRenderReply(); }
+    });
+    workspace.querySelector("#confirm-pickup").addEventListener("click", recipientConfirm);
+    if (reply.saved.size && !reply.parsed) recipientParseState("Saved from last time. Add when you'll arrive, or type to change anything.", "done");
+    recipientRenderReply();
+    recipientCountdown();
+  }
+
+  async function recipientParse() {
+    window.clearTimeout(state.parseTimer);
+    const input = workspace.querySelector("#handoff-text");
+    const reply = state.handoff;
+    if (!input || !reply) return;
+    const text = input.value.trim();
+    if (text.length < 3 || text === reply.text) return;
+    const seq = ++reply.seq;
+    reply.text = text;
+    recipientParseState("Reading…", "busy");
+    try {
+      const result = await api("/api/intake/handoff", { method: "POST", body: { text, offer_id: reply.offerId } });
+      if (seq !== reply.seq || state.handoff !== reply) return;
+      RECIPIENT_FIELDS.forEach((field) => {
+        // Never overwrite what the pantry typed or tapped; re-reads fill the rest.
+        const value = result.draft?.[field];
+        if (reply.edited.has(field) || reply.answered.has(field) || !hasValue(value)) return;
+        reply.draft[field] = value;
+        reply.confidence[field] = result.confidence?.[field] || "high";
+        reply.saved.delete(field);
+      });
+      reply.questions = arrayOf(result.questions);
+      reply.parsed = true;
+      recipientParseState(result.provider === "gemini" ? "Filled in by Gemini. Tap anything to change it." : "Filled in. Tap anything to change it.", "done");
+      recipientRenderReply();
+    } catch (err) {
+      if (isAuthError(err)) return recoverMissingContext("recipient");
+      if (seq === reply.seq && state.handoff === reply) recipientParseState(`${errorMessage(err)} You can fill in the details below yourself.`, "error");
+      recipientRenderReply();
+    }
+  }
+
+  function recipientParseState(message, tone = "") {
+    const status = workspace.querySelector("#handoff-parse");
+    if (!status) return;
+    status.textContent = message;
+    status.dataset.tone = tone;
+  }
+
+  function recipientTimeProblem(value) {
+    const time = new Date(value).getTime();
+    const deadline = new Date(state.handoff.deadline).getTime();
+    if (!Number.isFinite(time)) return "When will you get there?";
+    if (time <= Date.now()) return `${recipientClock(value)} has already passed. When will you get there?`;
+    if (Number.isFinite(deadline) && time > deadline) return `${recipientClock(value)} is after the food has to be gone (${recipientClock(state.handoff.deadline)}). When can you get there?`;
+    return "";
+  }
+
+  function recipientNeedsAnswer(field) {
+    const reply = state.handoff;
+    if (reply.editing === field) return false;
+    const value = reply.draft[field];
+    if (!hasValue(value)) return true;
+    if (field === "expected_handoff_time" && recipientTimeProblem(value)) return true;
+    if (field === "contact_phone" && String(value).replace(/\D/g, "").length < 7) return true;
+    return reply.confidence[field] === "low" && !reply.edited.has(field) && !reply.answered.has(field);
+  }
+
+  function recipientQuestionFor(field) {
+    const reply = state.handoff;
+    const value = reply.draft[field];
+    const problem = field === "expected_handoff_time" && hasValue(value) ? recipientTimeProblem(value) : "";
+    const server = reply.questions.find((question) => question.field === field);
+    if (server && !problem) return server;
+    if (field === "contact_name") return { field, prompt: "Who's picking it up?", kind: "text", options: [] };
+    if (field === "contact_phone") return { field, prompt: hasValue(value) ? "That number looks short. What number can the donor call?" : "What number can the donor call?", kind: "text", options: [] };
+    return { field, prompt: problem || "When will you get there?", kind: "choice", options: recipientTimeOptions(reply.deadline) };
+  }
+
+  function recipientTimeOptions(deadline) {
+    const step = 5 * 60000;
+    const end = new Date(deadline).getTime();
+    const options = [[30, "In 30 min"], [60, "In 1 hour"], [120, "In 2 hours"]]
+      .map(([minutes, label]) => ({ label, value: new Date(Math.ceil((Date.now() + minutes * 60000) / step) * step).toISOString() }))
+      .filter((option) => !Number.isFinite(end) || new Date(option.value).getTime() <= end);
+    const latest = Math.floor((end - 10 * 60000) / step) * step;
+    const last = options.length ? new Date(options[options.length - 1].value).getTime() : Date.now();
+    if (Number.isFinite(end) && latest > last + 20 * 60000) options.push({ label: `By ${recipientClock(latest)}`, value: new Date(latest).toISOString() });
+    return options;
+  }
+
+  function recipientRenderReply() {
+    const panel = workspace.querySelector("#handoff-result");
+    const reply = state.handoff;
+    if (!panel || !reply) return;
+    const chips = RECIPIENT_FIELDS.filter((field) => hasValue(reply.draft[field]) || reply.editing === field).map(recipientChip).join("");
+    // Until there is something to build on, the reply box is the only ask.
+    const started = reply.parsed || RECIPIENT_FIELDS.some((field) => hasValue(reply.draft[field]));
+    const questions = started ? RECIPIENT_FIELDS.filter(recipientNeedsAnswer).map((field) => recipientQuestion(recipientQuestionFor(field))).join("") : "";
+    panel.innerHTML = `${chips ? `<div class="chip-row">${chips}</div>` : ""}${questions}`;
+    panel.querySelector(".chip.editing [name=value]")?.focus();
+    recipientUpdateConfirm();
+  }
+
+  function recipientChipText(field) {
+    const value = state.handoff.draft[field];
+    return field === "expected_handoff_time" ? recipientClock(value) : String(value);
+  }
+
+  function recipientChip(field) {
+    const reply = state.handoff;
+    const label = RECIPIENT_LABELS[field];
+    if (reply.editing === field) {
+      const value = reply.draft[field];
+      const id = `handoff-edit-${field}`;
+      const control = field === "expected_handoff_time"
+        ? `<input id="${id}" name="value" type="datetime-local" required value="${e(localDateTimeValue(value))}" />`
+        : `<input id="${id}" name="value" required ${field === "contact_phone" ? `type="tel" autocomplete="tel" inputmode="tel"` : `autocomplete="name"`} value="${e(value || "")}" />`;
+      return `<form class="chip editing" data-field="${field}"><label for="${id}">${e(label)}</label>${control}<button class="chip-done" type="submit">Done</button></form>`;
+    }
+    const unsure = reply.confidence[field] === "low" && !reply.edited.has(field) && !reply.answered.has(field);
+    const tag = unsure ? " · best guess" : reply.saved.has(field) ? " · saved" : "";
+    return `<button type="button" class="chip${unsure ? " unsure" : ""}" data-edit="${field}" aria-label="${e(label)}: ${e(recipientChipText(field))}${unsure ? " (best guess)" : ""}. Change"><small>${e(label)}${e(tag)}</small><span>${e(recipientChipText(field))}</span></button>`;
+  }
+
+  function recipientQuestion(question) {
+    const field = e(question.field);
+    if (question.kind === "text") {
+      const type = question.field === "contact_phone" ? `type="tel" autocomplete="tel" inputmode="tel"` : `autocomplete="name"`;
+      return `<form class="question" data-question="${field}"><label for="hq-${field}">${e(question.prompt)}</label><div class="question-input"><input id="hq-${field}" name="value" required ${type} /><button class="button secondary" type="submit">OK</button></div></form>`;
+    }
+    const current = state.handoff.draft[question.field];
+    const buttons = arrayOf(question.options).map((option) => `<button type="button" class="option${option.value === current ? " selected" : ""}" data-answer="${field}" data-value="${e(option.value)}">${e(option.label)}</button>`).join("");
+    return `<fieldset class="question"><legend>${e(question.prompt)}</legend><div class="option-row">${buttons}<button type="button" class="option other" data-edit="${field}">Other time…</button></div></fieldset>`;
+  }
+
+  function onRecipientReplyClick(event) {
+    const reply = state.handoff;
+    const answer = event.target.closest("[data-answer]");
+    if (answer) {
+      reply.draft[answer.dataset.answer] = answer.dataset.value;
+      reply.answered.add(answer.dataset.answer);
+      reply.saved.delete(answer.dataset.answer);
+      recipientRenderReply();
+      return workspace.querySelector("#confirm-pickup:not(:disabled)")?.focus();
+    }
+    const edit = event.target.closest("[data-edit]");
+    if (edit) {
+      reply.editing = edit.dataset.edit;
+      recipientRenderReply();
+    }
+  }
+
+  function onRecipientReplySubmit(event) {
+    event.preventDefault();
+    const form = event.target;
+    const field = form.dataset.field || form.dataset.question;
+    const raw = String(new FormData(form).get("value") || "").trim();
+    if (!field || !raw) return;
+    const reply = state.handoff;
+    reply.draft[field] = field === "expected_handoff_time" ? new Date(raw).toISOString() : raw;
+    reply.edited.add(field);
+    reply.saved.delete(field);
+    reply.editing = "";
+    recipientRenderReply();
+  }
+
+  function recipientMissing() {
+    const reply = state.handoff;
+    const words = { contact_name: "who's coming", contact_phone: "a phone number", expected_handoff_time: "a pickup time" };
+    return RECIPIENT_FIELDS.filter((field) => {
+      const value = reply.draft[field];
+      if (!hasValue(value)) return true;
+      if (field === "expected_handoff_time") return Boolean(recipientTimeProblem(value));
+      if (field === "contact_phone") return String(value).replace(/\D/g, "").length < 7;
+      return false;
+    }).map((field) => words[field]);
+  }
+
+  function recipientUpdateConfirm() {
+    const button = workspace.querySelector("#confirm-pickup");
+    const hint = workspace.querySelector("#confirm-hint");
+    if (!button || !hint || !button.dataset.reservationId) return;
+    const missing = recipientMissing();
+    const untouched = missing.length === RECIPIENT_FIELDS.length && !state.handoff.parsed;
+    button.disabled = missing.length > 0;
+    hint.textContent = untouched ? "" : missing.length ? `Still need ${missing.join(", ")}.` : "The donor gets your name, number, and time.";
+  }
+
+  async function recipientConfirm(event) {
+    const button = event.currentTarget;
+    const reply = state.handoff;
+    if (recipientMissing().length) return recipientUpdateConfirm();
+    const payload = {
+      expected_handoff_time: new Date(reply.draft.expected_handoff_time).toISOString(),
+      contact_name: String(reply.draft.contact_name).trim(),
+      contact_phone: String(reply.draft.contact_phone).trim(),
+    };
+    const result = await mutateButton(button, `/api/reservations/${encodeURIComponent(button.dataset.reservationId)}/confirm`, payload, () => {
+      try { localStorage.setItem(RECIPIENT_CONTACT_KEY, JSON.stringify({ contact_name: payload.contact_name, contact_phone: payload.contact_phone })); } catch (_err) { /* storage is optional */ }
+      showToast("Pickup confirmed. The donor has your details.");
+      loadRecipient();
+    });
+    if (!result) { recipientUpdateConfirm(); loadRecipient(); }
+  }
+
+  function recipientCountdown() {
+    const element = workspace.querySelector("[data-recipient-expires]");
+    if (!element) return;
+    if (state.countdownTimer) window.clearInterval(state.countdownTimer);
+    const announce = workspace.querySelector("#recipient-timer-announce");
+    const box = element.closest(".recipient-timer");
+    let lastMinute = null;
+    const update = () => {
+      if (!element.isConnected) {
+        window.clearInterval(state.countdownTimer);
+        state.countdownTimer = null;
+        return;
+      }
+      const remaining = Math.max(0, new Date(element.dataset.recipientExpires).getTime() - Date.now());
+      const minutes = Math.floor(remaining / 60000);
+      const seconds = Math.floor((remaining % 60000) / 1000);
+      element.textContent = `${minutes}:${String(seconds).padStart(2, "0")}`;
+      box.classList.toggle("urgent", remaining < 2 * 60000);
+      // Announce a few milestones rather than every second.
+      if (lastMinute !== null && minutes !== lastMinute && [4, 1, 0].includes(minutes) && remaining > 0) announce.textContent = `${minutes + 1} minute${minutes ? "s" : ""} left to confirm.`;
+      lastMinute = minutes;
+      if (remaining === 0) {
+        window.clearInterval(state.countdownTimer);
+        state.countdownTimer = null;
+        box.querySelector(".recipient-timer-label").textContent = "Time's up. Checking if it's still yours…";
+        announce.textContent = "The hold ran out.";
+        loadRecipient();
+      }
+    };
+    update();
+    state.countdownTimer = window.setInterval(update, 1000);
   }
 
   async function renderCoordinator() {

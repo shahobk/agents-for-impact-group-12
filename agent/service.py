@@ -28,6 +28,7 @@ from .equity import run_bigquery_equity_audit
 from .intake import (
     IntakeError,
     IntakeInterpreter,
+    build_gemini_handoff_provider,
     build_gemini_photo_provider,
     build_gemini_text_provider,
 )
@@ -200,6 +201,22 @@ class IntakeExtractRequest(BaseModel):
         return value
 
 
+class HandoffIntakeRequest(BaseModel):
+    """A recipient's free-text pickup reply, e.g. "Maria, around 6:30, 404-555-0182"."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    text: str = Field(min_length=1, max_length=1_000)
+    offer_id: str = Field(min_length=1, max_length=200)
+    now: datetime | None = None
+
+    @field_validator("now")
+    @classmethod
+    def now_requires_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("now must include a timezone offset")
+        return value
+
+
 class GeocodeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     address: str = Field(min_length=3, max_length=500)
@@ -292,9 +309,19 @@ text_intake_provider = (
     if settings.enable_text_intake
     else None
 )
+handoff_intake_provider = (
+    build_gemini_handoff_provider(
+        project=settings.google_cloud_project,
+        location=settings.cloud_tasks_location,
+        model=settings.photo_intake_model,
+    )
+    if settings.enable_text_intake
+    else None
+)
 intake_interpreter = IntakeInterpreter(
     photo_provider=photo_provider,
     text_provider=text_intake_provider,
+    handoff_provider=handoff_intake_provider,
     max_photo_bytes=settings.max_photo_bytes,
 )
 geocode_provider = (
@@ -331,6 +358,7 @@ class TokenBucketRateLimiter:
 paid_rate_limiter = TokenBucketRateLimiter()
 _PAID_PUBLIC_PATHS = {
     "/api/intake/extract",
+    "/api/intake/handoff",
     "/api/locations/geocode",
     "/api/match",
     "/api/offers",
@@ -760,6 +788,25 @@ async def extract_intake(request: IntakeExtractRequest) -> dict[str, Any]:
         photo_mime_type=photo.mime_type if photo else None,
         photo_base64=photo.data_base64 if photo else None,
         now=request.now,
+    )
+
+
+@app.post("/api/intake/handoff", tags=["intake"])
+async def extract_handoff(
+    request: HandoffIntakeRequest, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    """Turn a recipient's pickup reply into confirmation suggestions; never confirms."""
+    state = workflow.repository.snapshot()
+    # Same scope as confirming: only the recipient notified about this offer.
+    record = workflow.tokens.authenticate(
+        state, _bearer(authorization), action="reservation:confirm", offer_id=request.offer_id
+    )
+    offer = state["offers"].get(request.offer_id)
+    if not offer or record.get("actor_id") not in offer.get("candidates", {}):
+        raise HTTPException(status_code=404, detail="Offer not found.")
+    deadline = datetime.fromisoformat(str(offer["deadline"]).replace("Z", "+00:00"))
+    return await intake_interpreter.extract_handoff(
+        text=request.text, deadline=deadline, now=request.now
     )
 
 

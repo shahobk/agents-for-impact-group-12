@@ -153,9 +153,6 @@ form { margin: 0; }
 .field textarea { min-height: 92px; resize: vertical; }
 .field input:focus-visible, .field textarea:focus-visible { border-color: var(--green); box-shadow: 0 0 0 3px rgb(20 95 69 / 15%); }
 .field small, .review-check small, .demo-access small { display: block; margin-top: 5px; color: var(--muted); font-size: .69rem; }
-.review-check { display: flex; gap: 11px; align-items: flex-start; margin: 4px 0 22px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
-.review-check input { width: 17px; height: 17px; margin-top: 3px; accent-color: var(--green); }
-.review-check span { flex: 1; }
 
 .button { min-height: 40px; padding: 10px 15px; border: 0; border-radius: 9px; cursor: pointer; font-size: .77rem; font-weight: 800; }
 .button:hover { transform: translateY(-1px); }
@@ -208,17 +205,12 @@ form { margin: 0; }
 .timeline li > span { width: 9px; height: 9px; margin-top: 6px; background: var(--green); border: 2px solid white; border-radius: 50%; box-shadow: 0 0 0 2px #b9cfc5; }
 
 .inbox-layout, .ops-layout { display: grid; grid-template-columns: minmax(280px, .7fr) minmax(0, 1.3fr); gap: 18px; align-items: start; }
-.inbox-layout.single-offer { grid-template-columns: minmax(0, 850px); justify-content: center; }
 .inbox-list, .ops-queue { position: sticky; top: 16px; }
 .notification-card, .ops-card { display: grid; width: 100%; gap: 4px; margin-top: 8px; padding: 13px; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; text-align: left; }
 .notification-card.active, .ops-card.active { background: #edf2db; border-color: #b6c866; }
 .notification-card span, .ops-card span { font-weight: 780; }
 .notification-card small, .ops-card small { color: var(--muted); font-size: .68rem; }
-.offer-detail > p { color: var(--muted); }
-.offer-detail .offer-name { margin-top: -10px; font-size: .92rem; }
 .action-block, .subsection { margin-top: 25px; padding-top: 22px; border-top: 1px solid var(--line); }
-.action-block h3 { margin: 0 0 12px; font-family: Georgia, serif; font-size: 1.4rem; font-weight: 500; }
-.countdown { color: var(--amber); font-size: .77rem; font-weight: 800; }
 .map-card { display: flex; gap: 13px; align-items: center; margin: 18px 0; padding: 15px; color: white; background: var(--ink); border-radius: 13px; }
 .map-card > div { display: grid; gap: 3px; }
 .map-card small { color: #bfccc6; font-size: .68rem; }
