@@ -20,6 +20,8 @@
   const DEMO_PICKUP = { latitude: 33.749, longitude: -84.388, source: "corrected_pin", address: "Downtown Atlanta demo grocery" };
   const SAVED_PICKUP_KEY = "pantry-relay:saved-pickup";
   const ATLANTA_CENTER = { lat: 33.749, lng: -84.388 };
+  // Mirrors ATLANTA_BOUNDS in agent/locations.py; offers outside it are rejected.
+  const ATLANTA_BOUNDS = { south: 33.45, north: 34.15, west: -84.85, east: -83.95 };
   const state = {
     role: normalizeRole(new URLSearchParams(location.search).get("role")),
     token: "",
@@ -292,6 +294,7 @@
     const draft = state.intake.draft;
     const missing = REQUIRED_FIELDS.filter((field) => !hasValue(draft[field])).map((field) => MISSING_LABELS[field]);
     if (!state.offerLocation) missing.push("pickup location");
+    if (hasValue(draft.pickup_deadline) && new Date(draft.pickup_deadline) <= new Date()) missing.push("a deadline that hasn't passed");
     return missing;
   }
 
@@ -403,11 +406,21 @@
   }
 
   function setPickup(location) {
+    if (!withinServiceArea(location)) {
+      const where = location.source === "gps" ? "Your current location is" : "That spot is";
+      setParseState(`${where} outside the Atlanta service area. Search for the store's Atlanta address instead.`, "error");
+      return;
+    }
     state.offerLocation = location;
     const input = workspace.querySelector("#pickup-address");
     if (input && location.address) input.value = location.address;
     renderPickup();
     updateSubmitState();
+  }
+
+  function withinServiceArea(location) {
+    const { latitude, longitude } = location || {};
+    return latitude >= ATLANTA_BOUNDS.south && latitude <= ATLANTA_BOUNDS.north && longitude >= ATLANTA_BOUNDS.west && longitude <= ATLANTA_BOUNDS.east;
   }
 
   async function renderPickup() {
@@ -451,7 +464,7 @@
       const { PlaceAutocompleteElement } = await maps.importLibrary("places");
       const slot = workspace.querySelector("#pickup-address-slot");
       if (!slot || !PlaceAutocompleteElement) return;
-      const autocomplete = new PlaceAutocompleteElement({ includedRegionCodes: ["us"], locationBias: { center: ATLANTA_CENTER, radius: 40000 } });
+      const autocomplete = new PlaceAutocompleteElement({ includedRegionCodes: ["us"], locationRestriction: ATLANTA_BOUNDS });
       autocomplete.id = "pickup-autocomplete";
       autocomplete.setAttribute("aria-label", "Pickup address");
       autocomplete.addEventListener("gmp-select", async ({ placePrediction }) => {
@@ -2293,7 +2306,9 @@
     try { result = await response.json(); } catch (_err) { /* handled below */ }
     if (!response.ok) {
       const detail = result.detail;
-      const message = typeof detail === "string" ? detail : detail?.message || detail?.code || result.error || `Request failed (${response.status})`;
+      // FastAPI validation errors arrive as a list; show the first readable reason.
+      const validation = Array.isArray(detail) ? String(detail[0]?.msg || "").replace(/^Value error, /, "") : "";
+      const message = typeof detail === "string" ? detail : validation || detail?.message || detail?.code || result.error || `Request failed (${response.status})`;
       const error = new Error(message);
       error.status = response.status;
       error.detail = detail;
