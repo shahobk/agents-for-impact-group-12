@@ -5,6 +5,8 @@ __pycache__/
 venv/
 env/
 .ipynb_checkpoints/
+.pytest_cache/
+.playwright-cli/
 
 # Credentials - never commit these
 *.json.key
@@ -24,3 +26,11 @@ data/*.parquet
 # ADK local session cache & IDE settings
 .adk/
 .vscode/
+
+# Keep the user's local hackathon plan private; ship implementation evidence.
+docs/*
+!docs/ARCHITECTURE.md
+!docs/DEMO.md
+!docs/E2E_IMPLEMENTATION_PLAN.md
+!docs/ORCHESTRATOR_PROMPT.md
+!docs/VALIDATION.md

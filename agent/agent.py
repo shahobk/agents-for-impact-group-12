@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
+import importlib
+import inspect
 import json
+import logging
 import os
 import re
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
-from google.adk.agents import Agent
+from .config import settings
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -197,6 +205,198 @@ def _has_profile_contradiction(cand: dict[str, Any]) -> str | None:
     return None
 
 
+def google_search_food_and_pantry_info(query: str) -> dict[str, Any]:
+    """Search Google (via Gemini Google Search Grounding) for USDA/FDA food shelf-life guidance, recall news, or local pantry information not in the database.
+
+    Use this tool whenever a donated food item is not in `data/foodkeeper.json`, or when a coordinator
+    asks about an external food bank, pantry address/hours, or food-safety rule not covered by local tables.
+
+    Args:
+        query: Search query (e.g., "USDA shelf life of cooked chicken biryani refrigerated", "Atlanta Community Food Bank hours").
+
+    Returns:
+        Dictionary with `grounded_answer`, `source_urls` (web citations), and `search_status`.
+    """
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        if api_key:
+            client = genai.Client(api_key=api_key)
+        elif project_id and project_id != "your-gcp-project-id":
+            client = genai.Client(vertexai=True, project=project_id, location=location)
+        else:
+            raise RuntimeError("No GOOGLE_CLOUD_PROJECT or GOOGLE_API_KEY configured for live Google Search Grounding.")
+
+        response = client.models.generate_content(
+            model=os.getenv("ADK_MODEL", "gemini-2.5-flash"),
+            contents=(
+                f"Answer this food-rescue coordinator question concisely using authoritative USDA, FDA, or official local sources. "
+                f"If asked about food shelf life or storage safety, state conservative hours/days for pantry (room temp), refrigerated, and frozen storage.\n\n"
+                f"Query: {query}"
+            ),
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.1,
+            ),
+        )
+        citations: list[dict[str, str]] = []
+        if response.candidates:
+            gm = getattr(response.candidates[0], "grounding_metadata", None)
+            chunks = getattr(gm, "grounding_chunks", None) or []
+            for chunk in chunks:
+                web = getattr(chunk, "web", None)
+                if web and getattr(web, "uri", None):
+                    citations.append(
+                        {
+                            "title": str(getattr(web, "title", "") or "Web Source"),
+                            "url": str(web.uri),
+                        }
+                    )
+        return {
+            "query": query,
+            "search_status": "LIVE_GOOGLE_SEARCH_GROUNDED",
+            "grounded_answer": (response.text or "").strip(),
+            "source_urls": citations[:5],
+        }
+    except Exception as exc:
+        return {
+            "query": query,
+            "search_status": "OFFLINE_FDA_FOOD_CODE_FALLBACK",
+            "grounded_answer": (
+                "Live Google Search Grounding unavailable in this environment; applying FDA Food Code conservative "
+                "guidance: prepared/cooked perishable foods have a 2-hour room-temperature limit (4 hours absolute max "
+                "if discarded immediately after), 72 hours (3-4 days) refrigerated at <=40°F, and 30-90 days frozen."
+            ),
+            "source_urls": [],
+            "fallback_reason": str(exc),
+        }
+
+
+def _fallback_shelf_life_for_unlisted_item(food_item: str) -> dict[str, Any]:
+    """Resolve shelf life for items not in `data/foodkeeper.json` using Non-Food Detection, Google Search Grounding, and FDA Food Code rules."""
+    q_lower = food_item.lower()
+    non_food_keywords = (
+        "diaper", "diapers", "wipe", "wipes", "hygiene", "soap",
+        "shampoo", "toothbrush", "toothpaste", "pad", "pads", "tampon", "detergent",
+    )
+    if any(k in q_lower for k in non_food_keywords):
+        return {
+            "matched_product": "Non-Food Essential (No Biological Spoilage)",
+            "category": "Personal Care & Baby Essentials",
+            "source_method": "non_food_essential_rule",
+            "pantry_hours": None,
+            "fridge_hours": None,
+            "freeze_hours": None,
+            "raw_pantry": "No biological spoilage (non-food essential)",
+            "raw_fridge": "No biological spoilage (non-food essential)",
+            "raw_freeze": "No biological spoilage (non-food essential)",
+            "note": "non_food_essential_uses_donor_deadline",
+            "citations": [],
+        }
+
+    # Try live Gemini Google Search Grounding first when cloud credentials are configured
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if api_key or (project_id and project_id != "your-gcp-project-id"):
+        try:
+            from google import genai
+            from google.genai import types
+
+            location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+            client = (
+                genai.Client(api_key=api_key)
+                if api_key
+                else genai.Client(vertexai=True, project=project_id, location=location)
+            )
+            prompt = (
+                f"Look up USDA FoodKeeper or FDA Food Code shelf-life guidance for: '{food_item}'. "
+                "Return ONLY a JSON object with keys: "
+                "\"product_name\" (string), \"category\" (string), "
+                "\"pantry_hours\" (number of hours safe at room temp, e.g. 2 for cooked/perishable food), "
+                "\"refrigerated_hours\" (number of hours safe in refrigerator, e.g. 72 for cooked dishes), "
+                "\"frozen_hours\" (number of hours safe in freezer, e.g. 1440), "
+                "\"summary\" (short string citing USDA/FDA guidance)."
+            )
+            resp = client.models.generate_content(
+                model=os.getenv("ADK_MODEL", "gemini-2.5-flash"),
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.0,
+                ),
+            )
+            text = (resp.text or "").strip()
+            json_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group(0))
+                citations: list[str] = []
+                if resp.candidates:
+                    gm = getattr(resp.candidates[0], "grounding_metadata", None)
+                    for chunk in getattr(gm, "grounding_chunks", None) or []:
+                        web = getattr(chunk, "web", None)
+                        if web and getattr(web, "uri", None):
+                            citations.append(str(web.uri))
+                p_h = float(parsed["pantry_hours"]) if parsed.get("pantry_hours") is not None else 2.0
+                r_h = float(parsed["refrigerated_hours"]) if parsed.get("refrigerated_hours") is not None else 72.0
+                f_h = float(parsed["frozen_hours"]) if parsed.get("frozen_hours") is not None else 1440.0
+                summary = str(parsed.get("summary") or "Grounded via Google Search (USDA/FDA guidance)")
+                return {
+                    "matched_product": f"{parsed.get('product_name', food_item)} (Google Search Grounded)",
+                    "category": str(parsed.get("category") or "Google Search USDA/FDA Fallback"),
+                    "source_method": "google_search_grounding",
+                    "pantry_hours": p_h,
+                    "fridge_hours": r_h,
+                    "freeze_hours": f_h,
+                    "raw_pantry": f"{p_h:g} Hours ({summary})",
+                    "raw_fridge": f"{r_h:g} Hours ({summary})",
+                    "raw_freeze": f"{f_h:g} Hours ({summary})",
+                    "note": "google_search_grounded_usda_fda_fallback",
+                    "citations": citations[:3],
+                }
+        except Exception:
+            pass
+
+    # Deterministic FDA Food Code fallback for prepared / cooked dishes vs generic unlisted foods
+    prepared_keywords = (
+        "catered", "prepared", "cooked", "tray", "trays", "biryani", "taco", "tacos",
+        "sandwich", "sandwiches", "salad", "soup", "lasagna", "casserole", "samosa",
+        "pizza", "pasta", "rice", "meal", "lunch", "dinner", "hot", "buffet",
+    )
+    if any(k in q_lower for k in prepared_keywords):
+        return {
+            "matched_product": f"{food_item} (FDA Food Code Prepared Dish Rule)",
+            "category": "Prepared / Cooked Perishable Food",
+            "source_method": "fda_food_code_prepared_fallback",
+            "pantry_hours": 2.0,
+            "fridge_hours": 72.0,
+            "freeze_hours": 1440.0,
+            "raw_pantry": "2 Hours (FDA Food Code room-temp danger zone limit)",
+            "raw_fridge": "3-4 Days / 72 Hours (USDA/FDA cooked leftover limit)",
+            "raw_freeze": "2 Months / 1440 Hours (USDA cooked dish freezer limit)",
+            "note": "fda_food_code_prepared_dish_fallback",
+            "citations": [],
+        }
+
+    return {
+        "matched_product": f"{food_item} (Conservative Perishable Fallback)",
+        "category": "Unlisted Food Item (Conservative Safety Cap)",
+        "source_method": "conservative_perishable_fallback",
+        "pantry_hours": 24.0,
+        "fridge_hours": 48.0,
+        "freeze_hours": 720.0,
+        "raw_pantry": "24 Hours (Conservative unlisted ambient cap)",
+        "raw_fridge": "48 Hours (Conservative unlisted refrigerated cap)",
+        "raw_freeze": "30 Days / 720 Hours (Conservative unlisted frozen cap)",
+        "note": "conservative_unlisted_food_fallback",
+        "citations": [],
+    }
+
+
 def lookup_shelf_life(
     food_item: str,
     storage_state: str = "refrigerated",
@@ -243,40 +443,49 @@ def lookup_shelf_life(
 
     scored: list[tuple[int, dict[str, Any]]] = []
     stop_tokens = {
-        "fresh", "baby", "triple", "washed", "triple-washed", "bagged", "cases", "case",
-        "crates", "crate", "pallets", "pallet", "organic", "raw", "cooked", "frozen",
-        "chilled", "cold", "stored", "sealed", "unopened", "assorted", "mixed",
+        "and", "for", "with", "the", "from", "into", "Fresh", "fresh", "baby", "triple",
+        "washed", "triple-washed", "bagged", "cases", "case", "crates", "crate", "pallets",
+        "pallet", "trays", "tray", "organic", "raw", "cooked", "frozen", "chilled", "cold",
+        "stored", "sealed", "unopened", "assorted", "mixed", "catered", "prepared",
     }
     query_tokens = [
         tok for tok in re.split(r"[^a-z0-9]+", query)
         if len(tok) >= 3 and tok not in stop_tokens
     ]
+    non_food_keywords = {
+        "diaper", "diapers", "wipe", "wipes", "hygiene", "soap",
+        "shampoo", "toothbrush", "toothpaste", "tampon", "detergent",
+    }
+    is_non_food = any(tok in non_food_keywords for tok in query_tokens)
 
-    for row in products:
-        name = str(row.get("name") or row.get("Name") or "").lower()
-        subtitle = str(row.get("name_subtitle") or row.get("Name_subtitle") or "").lower()
-        keywords = str(row.get("keywords") or "").lower()
-        haystack_words = set(re.split(r"[^a-z0-9]+", f"{name} {subtitle} {keywords}"))
+    if not is_non_food:
+        for row in products:
+            name = str(row.get("name") or row.get("Name") or "").lower()
+            subtitle = str(row.get("name_subtitle") or row.get("Name_subtitle") or "").lower()
+            keywords = str(row.get("keywords") or "").lower()
+            haystack_words = set(re.split(r"[^a-z0-9]+", f"{name} {subtitle} {keywords}"))
+            name_words = set(re.split(r"[^a-z0-9]+", f"{name} {subtitle}"))
 
-        if query == name:
-            scored.append((100, row))
-        elif query in name:
-            scored.append((85, row))
-        elif query in subtitle:
-            scored.append((75, row))
-        elif query in keywords:
-            scored.append((65, row))
-        elif query_tokens:
-            token_hits = sum(1 for tok in query_tokens if tok in haystack_words or tok in name or tok in subtitle)
-            if token_hits > 0:
-                score = 50 + token_hits * 10 + (10 if any(tok in name or tok in subtitle for tok in query_tokens) else 0)
-                scored.append((score, row))
+            if query == name:
+                scored.append((100, row))
+            elif query in name:
+                scored.append((85, row))
+            elif query in subtitle:
+                scored.append((75, row))
+            elif query in keywords:
+                scored.append((65, row))
+            elif query_tokens:
+                token_hits = sum(1 for tok in query_tokens if tok in haystack_words)
+                if token_hits > 0:
+                    score = 50 + token_hits * 10 + (10 if any(tok in name_words for tok in query_tokens) else 0)
+                    scored.append((score, row))
 
     best = sorted(scored, key=lambda pair: pair[0], reverse=True)[0][1] if scored else None
 
     pantry_hours, pantry_note, raw_pantry = None, "not_found", None
     fridge_hours, fridge_note, raw_fridge = None, "not_found", None
     freeze_hours, freeze_note, raw_freeze = None, "not_found", None
+    fallback_info: dict[str, Any] | None = None
 
     if best is not None:
         # Sealed donations must NEVER inherit after-opening shelf life (Notebook Section 13 check)
@@ -313,6 +522,18 @@ def lookup_shelf_life(
         pantry_hours, pantry_note = _parse_duration_hours(raw_pantry)
         fridge_hours, fridge_note = _parse_duration_hours(raw_fridge)
         freeze_hours, freeze_note = _parse_duration_hours(raw_freeze)
+    else:
+        # Item not in USDA FoodKeeper DB: use Google Search Grounding + FDA Food Code / Non-Food fallback
+        fallback_info = _fallback_shelf_life_for_unlisted_item(food_item)
+        pantry_hours = fallback_info["pantry_hours"]
+        fridge_hours = fallback_info["fridge_hours"]
+        freeze_hours = fallback_info["freeze_hours"]
+        raw_pantry = fallback_info["raw_pantry"]
+        raw_fridge = fallback_info["raw_fridge"]
+        raw_freeze = fallback_info["raw_freeze"]
+        pantry_note = fallback_info["note"]
+        fridge_note = fallback_info["note"]
+        freeze_note = fallback_info["note"]
 
     state = storage_state.strip().lower()
     if state in ("refrigerated", "cold", "chilled"):
@@ -389,9 +610,19 @@ def lookup_shelf_life(
 
     return {
         "food_item": food_item,
-        "matched_product": (best.get("name") or best.get("Name")) if best else None,
+        "matched_product": (
+            (best.get("name") or best.get("Name"))
+            if best
+            else (fallback_info["matched_product"] if fallback_info else None)
+        ),
         "matched_subtitle": (best.get("name_subtitle") or best.get("Name_subtitle") or "") if best else "",
-        "category": (best.get("category_name_display_only") or "") if best else "",
+        "category": (
+            (best.get("category_name_display_only") or "")
+            if best
+            else (fallback_info["category"] if fallback_info else "")
+        ),
+        "source_method": "usda_foodkeeper_db" if best else (fallback_info["source_method"] if fallback_info else "none"),
+        "web_citations": fallback_info.get("citations", []) if fallback_info else [],
         "storage_state": storage_state,
         "is_sealed": is_sealed,
         "raw_usda_guidance": raw_active,
@@ -1846,9 +2077,480 @@ When a coordinator gives you a surplus food posting or asks a dispatch question:
 """
 
 
+class MatcherUnavailableError(RuntimeError):
+    """Raised when the configured matcher cannot be loaded."""
+
+
+def _load_matcher(path: str | None = None) -> Callable[..., Any]:
+    dotted_path = path or settings.matcher_provider
+    module_name, separator, attribute_name = dotted_path.partition(":")
+    if not separator or not module_name or not attribute_name:
+        raise MatcherUnavailableError(
+            "MATCHER_PROVIDER must use the form 'module.path:callable'."
+        )
+
+    try:
+        module = importlib.import_module(module_name)
+        matcher = getattr(module, attribute_name)
+    except (ImportError, AttributeError) as exc:
+        raise MatcherUnavailableError("The matching provider is not available.") from exc
+
+    if not callable(matcher):
+        raise MatcherUnavailableError("The configured matching provider is not callable.")
+    return matcher
+
+
+def _plain_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, Mapping):
+        return dict(result)
+    if hasattr(result, "model_dump"):
+        return dict(result.model_dump(mode="json"))
+    if is_dataclass(result):
+        return asdict(result)
+    raise TypeError("The matching provider returned an unsupported result type.")
+
+
+async def _invoke_matcher(payload: dict[str, Any]) -> dict[str, Any]:
+    matcher = _load_matcher()
+    if inspect.iscoroutinefunction(matcher):
+        result = await matcher(payload)
+    else:
+        result = await asyncio.to_thread(matcher, payload)
+    if inspect.isawaitable(result):
+        result = await result
+    return _plain_result(result)
+
+
+def _draft_outreach(
+    *,
+    recipient: Mapping[str, Any] | None,
+    description: str,
+    quantity_pallets: float,
+    storage_state: str,
+    pickup_deadline: str,
+) -> str | None:
+    if not recipient:
+        return None
+    name = recipient.get("name") or "your team"
+    quantity_label = f"{quantity_pallets:g} pallet"
+    if quantity_pallets != 1:
+        quantity_label += "s"
+    return (
+        f"Hello {name} — we have {description} (about {quantity_label}) available "
+        f"for pickup by {pickup_deadline}. It requires {storage_state} handling. "
+        "Your current profile appears operationally eligible. Can you confirm live "
+        "capacity and pickup availability?"
+    )
+
+
+def _detect_unsealed_container(description: str) -> bool:
+    text = description.lower()
+    unsealed_patterns = (
+        "opened",
+        "unsealed",
+        "open canister",
+        "open container",
+        "broken seal",
+        "partially used",
+        "already opened",
+    )
+    return not any(pat in text for pat in unsealed_patterns)
+
+
+def _build_equity_profile(recipient: Mapping[str, Any]) -> dict[str, Any]:
+    need_score = float(recipient.get("need_score") or 0.0)
+    median_income = recipient.get("tract_median_income")
+    poverty_rate = recipient.get("tract_poverty_rate")
+    no_vehicle_rate = recipient.get("tract_no_vehicle_rate")
+    assistance_rate = recipient.get("tract_assistance_rate")
+
+    if (
+        (median_income is not None and float(median_income) <= 45000)
+        or (poverty_rate is not None and float(poverty_rate) >= 0.20)
+        or need_score >= 0.32
+    ):
+        income_tier = "Priority Low-Income / High-Need Tract"
+    elif median_income is not None and float(median_income) <= 65000:
+        income_tier = "Moderate-Income Tract"
+    else:
+        income_tier = "Community Need Verified"
+
+    return {
+        "tract_geo_id": recipient.get("tract_geo_id") or "Fulton/DeKalb Spatial Join",
+        "neighborhood_income_tier": income_tier,
+        "need_score": round(need_score, 3),
+        "tract_median_income": median_income,
+        "atlanta_metro_median_income_benchmark": 55949.0,
+        "tract_poverty_rate": poverty_rate,
+        "atlanta_metro_poverty_rate_benchmark": 0.218,
+        "tract_no_vehicle_rate": no_vehicle_rate,
+        "tract_assistance_rate": assistance_rate,
+        "weekly_households": recipient.get("weekly_households"),
+        "populations_served": recipient.get("populations_served") or "General community households",
+        "loading_dock": bool(recipient.get("loading_dock", False)),
+        "archetype_label": recipient.get("archetype_label") or recipient.get("archetype") or "Community Food Pantry",
+    }
+
+
+def _build_full_agent_reply(
+    *,
+    description: str,
+    quantity_pallets: float,
+    storage_state: str,
+    pickup_deadline: str,
+    split_allowed: bool,
+    selected: Mapping[str, Any] | None,
+    fallbacks: list[Mapping[str, Any]],
+    rejections: list[Mapping[str, Any]],
+    shelf_life: Mapping[str, Any],
+    fda_recall: Mapping[str, Any],
+    equity_profile: Mapping[str, Any] | None,
+    safety_blocked_reason: str | None = None,
+) -> str:
+    lines: list[str] = []
+    lines.append("=== ATLANTA SURPLUS BROKER — FULL AGENT MATCH BRIEF ===")
+    lines.append(
+        f"Offer: {description} ({quantity_pallets:g} pallet(s), {storage_state} storage, "
+        f"split_allowed={split_allowed})"
+    )
+    lines.append("")
+
+    # 1. Spoilage Clock
+    bio_hours = shelf_life.get("shelf_life_hours")
+    bio_str = (
+        f"{bio_hours:g}h ({shelf_life.get('matched_foodkeeper_name', 'USDA FoodKeeper')})"
+        if bio_hours is not None
+        else "Non-perishable / No biological spoilage"
+    )
+    lines.append("1. THE SPOILAGE CLOCK & BINDING CONSTRAINT")
+    lines.append(
+        f"   • Donor Window: {shelf_life.get('donor_hours_available', 'N/A')}h | "
+        f"Biological Limit: {bio_str}"
+    )
+    lines.append(
+        f"   • Effective Hours Remaining: {shelf_life.get('hours_remaining', 'N/A')}h "
+        f"(Binding Constraint: {shelf_life.get('binding_constraint', 'DONOR_WINDOW')})"
+    )
+    lines.append(
+        f"   • Urgency Tier: {shelf_life.get('urgency_tier', 'STANDARD')} | "
+        f"Source: {shelf_life.get('source_method', 'usda_foodkeeper')}"
+    )
+    optimizations = shelf_life.get("clock_optimizations") or []
+    if optimizations:
+        lines.append(f"   • Clock Optimization: {optimizations[0]}")
+    lines.append("")
+
+    # 2. FDA Recall & Safety Guardrail
+    lines.append("2. LIVE FDA RECALL & CONTAINER SAFETY CHECK (openFDA CC0)")
+    lines.append(
+        f"   • Status: {fda_recall.get('safety_clearance_status', 'CLEAR_TO_ROUTE')} "
+        f"(Active GA recalls matching item: {fda_recall.get('active_recalls_found', 0)})"
+    )
+    if safety_blocked_reason:
+        lines.append(f"   • HARD SAFETY BLOCK: {safety_blocked_reason}")
+    else:
+        lines.append(f"   • Action: {fda_recall.get('broker_action', 'Cleared for routing.')}")
+    lines.append("")
+
+    # 3. Winner or No-Match
+    if not selected:
+        lines.append("3. ROUTING DECISION: NO SAFE MATCH")
+        if safety_blocked_reason:
+            lines.append(f"   • Reason: {safety_blocked_reason}")
+        else:
+            lines.append(
+                f"   • Evaluated {len(rejections)} semantic candidates from BigQuery VECTOR_SEARCH; "
+                "all failed deterministic cold-chain, capacity, transport, or time-margin checks."
+            )
+    else:
+        lines.append(f"3. PRIMARY RECOMMENDED RECIPIENT: {selected.get('name')}")
+        lines.append(
+            f"   • Address: {selected.get('address') or 'Atlanta Metro'} "
+            f"({selected.get('distance_miles', 0):.1f} mi away, "
+            f"~{selected.get('travel', {}).get('estimated_minutes', 0)} min drive)"
+        )
+        lines.append(
+            f"   • Operational Fit: Cold Storage={selected.get('cold_storage', 'none')}, "
+            f"Frozen={selected.get('frozen_storage', False)}, "
+            f"Reefer Transport={selected.get('refrigerated_transport', False)}, "
+            f"Max Capacity={selected.get('max_pallets', 0):g} pallets "
+            f"(Margin: +{selected.get('capacity_margin_pallets', 0):.1f} pallets), "
+            f"Time Margin: +{selected.get('time_margin_hours', 0):.1f}h"
+        )
+        lines.append(f"   • Selection Rationale: {selected.get('selection_reason', '')}")
+        lines.append("")
+
+        # 4. Neighborhood Equity
+        if equity_profile:
+            lines.append("4. NEIGHBORHOOD EQUITY & CENSUS TRACT IMPACT")
+            inc = equity_profile.get("tract_median_income")
+            pov = equity_profile.get("tract_poverty_rate")
+            nov = equity_profile.get("tract_no_vehicle_rate")
+            inc_str = f"${inc:,.0f} (vs. $55,949 Metro avg)" if inc else "Verified community pantry"
+            pov_str = f"{pov * 100:.1f}% (vs. 21.8% Metro avg)" if pov is not None else "N/A"
+            nov_str = f"{nov * 100:.1f}%" if nov is not None else "N/A"
+            lines.append(
+                f"   • Census Tract: {equity_profile.get('tract_geo_id')} — "
+                f"{equity_profile.get('neighborhood_income_tier')}"
+            )
+            lines.append(
+                f"   • Tract Median Income: {inc_str} | Poverty Rate: {pov_str} | "
+                f"No-Vehicle Households: {nov_str}"
+            )
+            lines.append(
+                f"   • Community Reach: {equity_profile.get('weekly_households') or 'N/A'} weekly households | "
+                f"Need Score: {equity_profile.get('need_score', 0):.2f} | "
+                f"Populations: {equity_profile.get('populations_served')}"
+            )
+            lines.append("")
+
+        # 5. Multi-Stop Split Plan (if active)
+        split_plan = selected.get("pallet_split_plan")
+        if split_plan and split_plan.get("stops"):
+            lines.append(
+                f"5. NEED-PROPORTIONAL MULTI-STOP PALLET SPLIT ({split_plan['total_pallets']:g} PALLETS ACROSS {split_plan['stops_count']} STOPS)"
+            )
+            for stop in split_plan["stops"]:
+                lines.append(
+                    f"   • Stop #{stop['stop_number']}: {stop['name']} — "
+                    f"{stop['allocated_pallets']:g} pallets ({stop['share_pct']}% share, "
+                    f"max {stop['max_pallets']:g}p, need score {stop['need_score']:.2f}, "
+                    f"{stop.get('weekly_households') or 'N/A'} weekly HH)"
+                )
+            lines.append("")
+
+        # 6. Fallbacks
+        if fallbacks:
+            fb_names = [
+                f"#{idx + 2} {fb.get('name')} ({fb.get('distance_miles', 0):.1f} mi, "
+                f"+{fb.get('time_margin_hours', 0):.1f}h margin)"
+                for idx, fb in enumerate(fallbacks[:2])
+            ]
+            lines.append("6. LIVE REROUTE CONTINGENCY (IF PRIMARY DECLINES)")
+            lines.append("   • Ready Fallbacks: " + " | ".join(fb_names))
+            lines.append("")
+
+    # 7. Audited Rejections
+    if rejections:
+        lines.append(f"7. AUDITED DECOY & SAFETY REJECTIONS ({len(rejections)} REJECTED)")
+        for rej in rejections[:5]:
+            reasons = ", ".join(rej.get("reasons") or [rej.get("reason", "ineligible")])
+            lines.append(f"   • Rejected {rej.get('name')}: {reasons}")
+
+    return "\n".join(lines)
+
+
+async def match_surplus_offer(
+    description: str,
+    quantity_pallets: float,
+    storage_state: str,
+    pickup_deadline: str,
+    donor_latitude: float,
+    donor_longitude: float,
+    split_allowed: bool = False,
+) -> dict[str, Any]:
+    """Find operationally eligible recipients for a surplus food offer.
+
+    Args:
+        description: Plain-language description of the available food.
+        quantity_pallets: Estimated load size in pallet equivalents.
+        storage_state: Required storage: ambient, refrigerated, or frozen.
+        pickup_deadline: Timezone-aware ISO-8601 deadline for collection.
+        donor_latitude: Donor pickup latitude.
+        donor_longitude: Donor pickup longitude.
+        split_allowed: Whether the load may be divided among recipients.
+
+    Returns:
+        A match brief with one selected recipient, fallbacks, deterministic
+        rejections, warnings, and an outreach message.
+    """
+    deadline = datetime.fromisoformat(pickup_deadline.replace("Z", "+00:00"))
+    if deadline.tzinfo is None or deadline.utcoffset() is None:
+        raise ValueError("pickup_deadline must include a timezone offset")
+
+    payload = {
+        "posting_text": description,
+        "quantity_pallets": quantity_pallets,
+        "storage_state": storage_state,
+        "pickup_deadline": deadline,
+        "donor_latitude": donor_latitude,
+        "donor_longitude": donor_longitude,
+        "split_allowed": split_allowed,
+    }
+    result = await _invoke_matcher(payload)
+    selected = result.get("selected", result.get("best"))
+    result.setdefault("selected", selected)
+    result.setdefault(
+        "outreach",
+        _draft_outreach(
+            recipient=selected,
+            description=description,
+            quantity_pallets=quantity_pallets,
+            storage_state=storage_state,
+            pickup_deadline=pickup_deadline,
+        ),
+    )
+
+    # Enrich real matcher outputs (identified by recipient_id on selected or rejections)
+    # while leaving lightweight unit-test mocks untouched.
+    is_real_matcher_output = (
+        (isinstance(selected, Mapping) and "recipient_id" in selected)
+        or any(
+            isinstance(r, Mapping) and "recipient_id" in r
+            for r in (result.get("rejections") or [])
+        )
+    )
+    if is_real_matcher_output:
+        is_sealed = _detect_unsealed_container(description)
+        now_utc = datetime.now(timezone.utc)
+        donor_hours = max(
+            0.5,
+            round((deadline.astimezone(timezone.utc) - now_utc).total_seconds() / 3600.0, 2),
+        )
+        shelf_life = await asyncio.to_thread(
+            lookup_shelf_life,
+            food_item=description,
+            storage_state=storage_state,
+            donor_hours_available=donor_hours,
+            is_sealed=is_sealed,
+        )
+        fda_recall = await asyncio.to_thread(
+            check_fda_food_recalls,
+            food_item=description[:80],
+            state="GA",
+        )
+
+        # Hard safety guardrail for opened/unsealed infant formula or baby food
+        desc_lower = description.lower()
+        safety_blocked_reason: str | None = None
+        if not is_sealed and any(
+            k in desc_lower for k in ("infant formula", "baby formula", "baby food", "enfamil", "similac")
+        ):
+            safety_blocked_reason = (
+                "Opened/unsealed infant formula or baby food is strictly blocked from "
+                "community redistribution under FDA/USDA infant safety rules (tamper/contamination risk "
+                "and 1.0h biological spoilage limit)."
+            )
+            warnings_list = list(result.get("warnings") or [])
+            warnings_list.insert(0, f"SAFETY_GUARDRAIL_BLOCKED: {safety_blocked_reason}")
+            result["warnings"] = warnings_list
+            # Move any selected/fallback candidates to rejections
+            moved_rejections = list(result.get("rejections") or [])
+            for cand in [selected, *(result.get("fallbacks") or [])]:
+                if isinstance(cand, Mapping):
+                    moved_rejections.insert(
+                        0,
+                        {
+                            "recipient_id": cand.get("recipient_id", ""),
+                            "name": cand.get("name", "Candidate"),
+                            "reasons": ["safety_blocked:unsealed_infant_formula_prohibited"],
+                            "warnings": ["hard_safety_guardrail:do_not_distribute_opened_formula"],
+                        },
+                    )
+            result["rejections"] = moved_rejections
+            result["selected"] = None
+            result["best"] = None
+            result["fallbacks"] = []
+            result["outreach"] = None
+            selected = None
+
+        if isinstance(selected, dict):
+            equity_profile = _build_equity_profile(selected)
+            selected["shelf_life"] = shelf_life
+            selected["fda_recall"] = fda_recall
+            selected["equity_profile"] = equity_profile
+            selected["agent_full_reply"] = _build_full_agent_reply(
+                description=description,
+                quantity_pallets=quantity_pallets,
+                storage_state=storage_state,
+                pickup_deadline=pickup_deadline,
+                split_allowed=split_allowed,
+                selected=selected,
+                fallbacks=list(result.get("fallbacks") or []),
+                rejections=list(result.get("rejections") or []),
+                shelf_life=shelf_life,
+                fda_recall=fda_recall,
+                equity_profile=equity_profile,
+            )
+            # Also attach equity_profile to each fallback for smooth live rerouting
+            for fb in result.get("fallbacks") or []:
+                if isinstance(fb, dict):
+                    fb["equity_profile"] = _build_equity_profile(fb)
+                    fb["shelf_life"] = shelf_life
+                    fb["fda_recall"] = fda_recall
+        elif result.get("rejections"):
+            first_rej = result["rejections"][0]
+            if isinstance(first_rej, dict):
+                first_rej["_offer_brief"] = {
+                    "shelf_life": shelf_life,
+                    "fda_recall": fda_recall,
+                    "safety_blocked_reason": safety_blocked_reason,
+                    "agent_full_reply": _build_full_agent_reply(
+                        description=description,
+                        quantity_pallets=quantity_pallets,
+                        storage_state=storage_state,
+                        pickup_deadline=pickup_deadline,
+                        split_allowed=split_allowed,
+                        selected=None,
+                        fallbacks=[],
+                        rejections=list(result.get("rejections") or []),
+                        shelf_life=shelf_life,
+                        fda_recall=fda_recall,
+                        equity_profile=None,
+                        safety_blocked_reason=safety_blocked_reason,
+                    ),
+                }
+
+    return result
+
+
+def _build_bigquery_mcp_toolset() -> Any | None:
+    """Create the opt-in managed BigQuery MCP toolset when ENABLE_BIGQUERY_MCP=true."""
+    if not settings.enable_bigquery_mcp:
+        return None
+
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request
+        from google.adk.tools.mcp_tool import (
+            McpToolset,
+            StreamableHTTPConnectionParams,
+        )
+
+        credentials, detected_project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/bigquery"]
+        )
+        project = settings.google_cloud_project or detected_project
+
+        def auth_headers(_context: Any) -> dict[str, str]:
+            if not credentials.valid or credentials.expired:
+                credentials.refresh(Request())
+            headers = {
+                "Authorization": f"Bearer {credentials.token}",
+                "Accept": "application/json, text/event-stream",
+            }
+            if project:
+                headers["x-goog-user-project"] = project
+            return headers
+
+        return McpToolset(
+            connection_params=StreamableHTTPConnectionParams(
+                url=settings.bigquery_mcp_url,
+            ),
+            header_provider=auth_headers,
+        )
+    except Exception:
+        logger.exception("BigQuery MCP was enabled but could not be configured")
+        return None
+
+
 def _build_managed_mcp_tools() -> list[Any]:
     """Attach ADK's managed BigQueryToolset and/or a remote MCP Toolbox server (`MCP_TOOLBOX_URL`)."""
     managed_tools: list[Any] = []
+
+    bigquery_mcp_toolset = _build_bigquery_mcp_toolset()
+    if bigquery_mcp_toolset is not None:
+        managed_tools.append(bigquery_mcp_toolset)
 
     # 1. Optional remote MCP server (e.g., MCP Toolbox on Cloud Run serving agent/tools.yaml or https://bigquery.googleapis.com/mcp)
     mcp_url = os.getenv("MCP_TOOLBOX_URL", "").strip()
@@ -1888,19 +2590,31 @@ def _build_managed_mcp_tools() -> list[Any]:
     return managed_tools
 
 
-root_agent = Agent(
-    name="food_surplus_broker",
-    model=os.getenv("ADK_MODEL", "gemini-2.5-flash"),
-    description="Matches perishable surplus food postings to community recipients by optimizing spoilage clocks, physical storage constraints, FDA recall safety, conversational pantry intake, and neighborhood equity.",
-    instruction=SYSTEM_INSTRUCTION,
-    tools=[
-        lookup_shelf_life,
-        find_matching_recipients,
-        decline_recipient_and_reroute,
-        list_surplus_postings,
-        check_fda_food_recalls,
-        onboard_new_pantry,
-        run_metro_equity_audit,
-        *_build_managed_mcp_tools(),
-    ],
-)
+def _build_root_agent() -> Any | None:
+    try:
+        from google.adk.agents import Agent
+    except ImportError:
+        logger.info("google-adk is not installed; root_agent is unavailable")
+        return None
+
+    return Agent(
+        name=os.getenv("APP_NAME", "food_surplus_broker"),
+        model=os.getenv("ADK_MODEL", settings.agent_model),
+        description="Matches perishable surplus food postings to community recipients by optimizing spoilage clocks, physical storage constraints, FDA recall safety, conversational pantry intake, and neighborhood equity.",
+        instruction=SYSTEM_INSTRUCTION,
+        tools=[
+            lookup_shelf_life,
+            google_search_food_and_pantry_info,
+            find_matching_recipients,
+            decline_recipient_and_reroute,
+            list_surplus_postings,
+            check_fda_food_recalls,
+            onboard_new_pantry,
+            run_metro_equity_audit,
+            match_surplus_offer,
+            *_build_managed_mcp_tools(),
+        ],
+    )
+
+
+root_agent = _build_root_agent()

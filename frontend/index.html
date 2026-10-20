@@ -7,9 +7,9 @@
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='10' fill='%23176b4d'/%3E%3Cpath d='M8 17c5-9 12-7 16-11-1 11-6 18-16 11Z' fill='%23c9dc74'/%3E%3C/svg%3E" />
     <meta
       name="description"
-      content="Match Atlanta grocery surplus with a safe, ready recipient."
+      content="Match Atlanta grocery, farm, and essential surplus with a safe, equity-verified community recipient."
     />
-    <title>Pantry Relay | Atlanta grocery rescue</title>
+    <title>Pantry Relay | Atlanta Surplus &amp; Food Equity Broker</title>
     <link rel="stylesheet" href="./styles.css" />
     <script src="./app.js" defer></script>
   </head>
@@ -22,17 +22,18 @@
       </a>
       <div class="header-meta">
         <span class="pulse-dot" aria-hidden="true"></span>
-        <span>Atlanta pilot</span>
+        <span>Atlanta Metro · BigQuery AI.EMBED + USDA + openFDA</span>
       </div>
     </header>
 
     <main>
       <section class="intro" aria-labelledby="page-title">
-        <p class="eyebrow">Fast, explainable grocery rescue</p>
+        <p class="eyebrow">Resilient Food Equity &amp; Surplus Broker</p>
         <h1 id="page-title">Turn surplus into a safe handoff.</h1>
         <p>
-          Describe what needs a home. We check fit, cold storage, capacity, travel time,
-          and deadline—then give you one clear call to make.
+          Describe what needs a home. We verify biological shelf life (USDA FoodKeeper &amp; Google Search Grounding),
+          live openFDA recalls, cold-chain storage, travel time, and Census Tract neighborhood equity—then give you the
+          complete agent brief and one clear call to make.
         </p>
       </section>
 
@@ -46,6 +47,36 @@
             <button class="text-button" id="load-demo" type="button">Load spinach demo</button>
           </div>
 
+          <div class="preset-section" aria-label="Challenge scenario presets">
+            <span class="preset-label">Quick-load judge scenarios (Retail · Farm · Essentials · Safety):</span>
+            <div class="preset-chips" id="preset-chips">
+              <button type="button" class="preset-chip" data-preset="spinach">
+                Spinach · Cold Chain + Tie-Break
+              </button>
+              <button type="button" class="preset-chip" data-preset="potatoes">
+                5 Tons Potatoes · Farm Multi-Stop Split
+              </button>
+              <button type="button" class="preset-chip" data-preset="formula_sealed">
+                Sealed Infant Formula · Essentials
+              </button>
+              <button type="button" class="preset-chip preset-chip-warn" data-preset="formula_open">
+                Opened Formula · Hard Safety Block
+              </button>
+              <button type="button" class="preset-chip" data-preset="halal_chicken">
+                Halal Chicken · Cultural + Reefer
+              </button>
+              <button type="button" class="preset-chip" data-preset="biryani">
+                Catered Biryani · Unlisted Search Fallback
+              </button>
+            </div>
+            <div class="posting-picker-row">
+              <label for="bq-posting-select" class="sr-only">Load from BigQuery surplus postings</label>
+              <select id="bq-posting-select" class="posting-select">
+                <option value="">Or load one of the 10 BigQuery surplus_postings…</option>
+              </select>
+            </div>
+          </div>
+
           <form id="offer-form">
             <div class="field field-full">
               <label for="description">Food description</label>
@@ -56,7 +87,7 @@
                 required
                 placeholder="e.g. 10 crates of fresh spinach"
               ></textarea>
-              <span class="field-hint">Include food type, packaging, and any dietary notes.</span>
+              <span class="field-hint">Include food type, packaging (sealed/opened), and any cultural or dietary notes.</span>
             </div>
 
             <div class="form-grid">
@@ -109,7 +140,7 @@
                 type="text"
                 autocomplete="street-address"
                 required
-                placeholder="Store or street address"
+                placeholder="Store, farm, or warehouse address"
               />
             </div>
 
@@ -147,8 +178,8 @@
             <label class="check-row" for="split-allowed">
               <input id="split-allowed" name="split_allowed" type="checkbox" />
               <span>
-                <strong>Split this donation if needed</strong>
-                <small>Allow the matcher to consider more than one recipient.</small>
+                <strong>Split this donation if needed (Multi-stop need-proportional split)</strong>
+                <small>Allocates large or farm-scale loads across multiple pantries weighted by Census Tract equity need.</small>
               </span>
             </label>
 
@@ -164,7 +195,7 @@
         <section class="panel result-panel" aria-labelledby="result-heading">
           <div class="panel-heading result-heading-row">
             <div>
-              <p class="step-label">02 · Recommendation</p>
+              <p class="step-label">02 · Recommendation &amp; Full Agent Brief</p>
               <h2 id="result-heading">Your best next call</h2>
             </div>
             <span id="result-status" class="status-chip">Waiting for offer</span>
@@ -179,29 +210,117 @@
               </div>
               <h3>A match you can explain</h3>
               <p>
-                Submit an offer to see one selected recipient, two fallbacks, constraint checks,
-                and ready-to-send outreach.
+                Submit an offer or pick a scenario preset to inspect the full agent reply,
+                spoilage clock, openFDA recall check, Census Tract equity metrics, multi-stop pallet split,
+                and live fallback rerouting.
               </p>
               <ul class="empty-checks" aria-label="Checks performed">
-                <li>Storage</li>
-                <li>Capacity</li>
-                <li>Travel margin</li>
+                <li>USDA + Search Clock</li>
+                <li>openFDA Recalls</li>
+                <li>Cold Chain &amp; Capacity</li>
+                <li>Census Tract Equity</li>
               </ul>
             </div>
           </div>
         </section>
       </div>
+
+      <section class="judge-suite" aria-labelledby="judge-suite-heading">
+        <div class="judge-suite-header">
+          <div>
+            <p class="eyebrow">03 · System-Level Judge Evidence</p>
+            <h2 id="judge-suite-heading">Metro Equity Outcome Audit &amp; Live BigQuery Pantry Intake</h2>
+          </div>
+        </div>
+
+        <div class="judge-suite-grid">
+          <article class="panel judge-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="step-label">Equity Verification</p>
+                <h3>10-Posting Metro Equity Outcome Audit</h3>
+              </div>
+              <button class="secondary-button" id="run-audit-button" type="button">
+                Run Live Audit
+              </button>
+            </div>
+            <p class="judge-panel-desc">
+              Evaluates all 10 Challenge Surplus Postings across Retail, Farm, and Essentials tracks, comparing our
+              Equity-Aware Broker against the Atlanta Metro Census Tract Baseline and a Naive Logistics-Only Baseline.
+            </p>
+            <div id="audit-results-region" class="audit-results-region">
+              <p class="muted-placeholder">Click “Run Live Audit” to compute metro-wide poverty, income, and dock-bias metrics.</p>
+            </div>
+          </article>
+
+          <article class="panel judge-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="step-label">Conversational Intake &amp; Vector Indexing</p>
+                <h3>Onboard New Pantry (`AI.EMBED`)</h3>
+              </div>
+              <button class="text-button" id="fill-onboard-sample" type="button">
+                Fill Southside sample
+              </button>
+            </div>
+            <p class="judge-panel-desc">
+              Writes a new community recipient to <code>a4i_food.recipients</code> and immediately generates a
+              768-dimensional semantic vector in <code>a4i_food.recipient_embeddings</code> using BigQuery <code>AI.EMBED</code>.
+            </p>
+            <form id="onboard-form" class="onboard-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="onboard-name">Organization name</label>
+                  <input id="onboard-name" name="name" type="text" required value="Southside Pittsburgh Community Fridge &amp; Pantry" />
+                </div>
+                <div class="field">
+                  <label for="onboard-street">Street address</label>
+                  <input id="onboard-street" name="street" type="text" required value="920 McDaniel St SW" />
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field">
+                  <label for="onboard-cold">Cold storage</label>
+                  <input id="onboard-cold" name="cold_storage" type="text" required value="walk-in" />
+                </div>
+                <div class="field">
+                  <label for="onboard-pallets">Max pallets</label>
+                  <input id="onboard-pallets" name="max_pallets" type="number" min="1" max="20" required value="3" />
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field">
+                  <label for="onboard-households">Weekly households</label>
+                  <input id="onboard-households" name="weekly_households" type="number" min="10" required value="420" />
+                </div>
+                <div class="field">
+                  <label for="onboard-days">Service days</label>
+                  <input id="onboard-days" name="service_days" type="text" required value="Monday, Tuesday, Wednesday, Thursday, Friday, Saturday" />
+                </div>
+              </div>
+              <div class="field">
+                <label for="onboard-desc">Capabilities &amp; populations served</label>
+                <textarea id="onboard-desc" name="profile_description" rows="2" required>Grassroots Southside pantry with commercial walk-in cooler serving 420 low-income families, seniors, and SNAP-gap households weekly. No loading dock; street-level pallet jack access.</textarea>
+              </div>
+              <button class="secondary-button secondary-button-full" id="onboard-submit-button" type="submit">
+                Onboard &amp; Index in BigQuery (`AI.EMBED`)
+              </button>
+            </form>
+            <div id="onboard-result-region" class="onboard-result-region"></div>
+          </article>
+        </div>
+      </section>
     </main>
 
     <footer>
-      <p>Decision support for Atlanta coordinators · Verify availability before dispatch</p>
+      <p>Decision support for Atlanta coordinators · Powered by Google ADK, BigQuery VECTOR_SEARCH, USDA FoodKeeper, and openFDA</p>
     </footer>
 
     <template id="loading-template">
       <div class="loading-state" role="status">
         <div class="loading-route" aria-hidden="true"><span></span></div>
         <p class="eyebrow">Checking Atlanta recipients</p>
-        <h3>Balancing safety, distance, and urgency…</h3>
+        <h3>Verifying USDA shelf life, openFDA recalls, cold chain, and Census Tract equity…</h3>
         <div class="skeleton-lines" aria-hidden="true"><span></span><span></span><span></span></div>
       </div>
     </template>

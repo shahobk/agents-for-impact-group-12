@@ -231,11 +231,20 @@ def _recommendation(evaluation: CandidateEvaluation, request: MatchRequest) -> d
             "cold_storage": candidate.cold_storage,
             "frozen_storage": candidate.frozen_storage,
             "refrigerated_transport": candidate.refrigerated_transport,
+            "loading_dock": candidate.loading_dock,
             "max_pallets": candidate.max_pallets,
             "pickup_window_hours": candidate.pickup_window_hours,
             "service_days": candidate.service_days,
             "profile_text": candidate.profile_text,
             "populations_served": candidate.populations_served,
+            "weekly_households": candidate.weekly_households,
+            "archetype": candidate.archetype,
+            "archetype_label": candidate.archetype_label,
+            "tract_geo_id": candidate.tract_geo_id,
+            "tract_poverty_rate": candidate.tract_poverty_rate,
+            "tract_no_vehicle_rate": candidate.tract_no_vehicle_rate,
+            "tract_assistance_rate": candidate.tract_assistance_rate,
+            "tract_median_income": candidate.tract_median_income,
             "selection_reason": (
                 f"Eligible with {evaluation.time_margin_hours:.1f} hours of travel/handling "
                 f"margin, {evaluation.distance_miles:.1f} miles away, and "
@@ -265,6 +274,96 @@ def _recommendation(evaluation: CandidateEvaluation, request: MatchRequest) -> d
     return result
 
 
+def _build_pallet_split_plan(
+    evaluations: list[CandidateEvaluation],
+    request: MatchRequest,
+) -> dict[str, Any] | None:
+    """Compute a need-proportional multi-stop pallet split across safe candidates."""
+    if not request.split_allowed or request.quantity_pallets < 1.5:
+        return None
+
+    split_viable = [
+        item
+        for item in evaluations
+        if item.candidate.max_pallets >= 0.5
+        and all(r.startswith("capacity_insufficient:") for r in item.reasons)
+    ]
+    if len(split_viable) < 2:
+        return None
+
+    split_viable.sort(
+        key=lambda e: (
+            -e.need_score,
+            -e.time_margin_hours,
+            e.distance_miles,
+            e.semantic_distance,
+        )
+    )
+    pool = split_viable[:4]
+    total_capacity = sum(item.candidate.max_pallets for item in pool)
+    if total_capacity < request.quantity_pallets:
+        return None
+
+    raw_weights = []
+    for item in pool:
+        hh_norm = min(1.0, (item.candidate.weekly_households or 150) / 800.0)
+        w = max(0.05, 0.60 * item.need_score + 0.40 * hh_norm)
+        raw_weights.append(w)
+    weight_sum = sum(raw_weights) or 1.0
+
+    remaining = round(request.quantity_pallets, 2)
+    stops: list[dict[str, Any]] = []
+    for idx, (item, w) in enumerate(zip(pool, raw_weights)):
+        if remaining <= 0:
+            break
+        ideal = round(request.quantity_pallets * (w / weight_sum), 1)
+        allocated = min(item.candidate.max_pallets, max(0.5, ideal), remaining)
+        if idx == len(pool) - 1 and remaining <= item.candidate.max_pallets:
+            allocated = round(remaining, 2)
+        allocated = round(allocated, 2)
+        if allocated <= 0:
+            continue
+        remaining = round(remaining - allocated, 2)
+        stops.append(
+            {
+                "stop_number": len(stops) + 1,
+                "recipient_id": item.recipient_id,
+                "name": item.name,
+                "allocated_pallets": allocated,
+                "max_pallets": item.candidate.max_pallets,
+                "share_pct": round(100.0 * allocated / request.quantity_pallets, 1),
+                "distance_miles": round(item.distance_miles, 2),
+                "need_score": round(item.need_score, 3),
+                "weekly_households": item.candidate.weekly_households,
+                "tract_median_income": item.candidate.tract_median_income,
+                "tract_poverty_rate": item.candidate.tract_poverty_rate,
+            }
+        )
+
+    if remaining > 0 and stops:
+        for stop, item in zip(stops, pool):
+            headroom = round(item.candidate.max_pallets - stop["allocated_pallets"], 2)
+            if headroom > 0:
+                extra = round(min(headroom, remaining), 2)
+                stop["allocated_pallets"] = round(stop["allocated_pallets"] + extra, 2)
+                stop["share_pct"] = round(
+                    100.0 * stop["allocated_pallets"] / request.quantity_pallets, 1
+                )
+                remaining = round(remaining - extra, 2)
+                if remaining <= 0:
+                    break
+
+    if len(stops) < 2 or remaining > 0.05:
+        return None
+
+    return {
+        "total_pallets": request.quantity_pallets,
+        "stops_count": len(stops),
+        "allocation_method": "Need-Proportional Split (60% Census Tract Equity Need + 40% Weekly Households)",
+        "stops": stops,
+    }
+
+
 def _call_provider(
     provider: CandidateProvider, request: MatchRequest
 ) -> Iterable[RecipientCandidate | Mapping[str, Any]]:
@@ -291,12 +390,56 @@ def match_surplus(
     eligible = sorted((item for item in evaluations if item.eligible), key=_ranking_key)
     rejected = [item for item in evaluations if not item.eligible]
 
+    pallet_split_plan = _build_pallet_split_plan(evaluations, parsed)
+
+    # When split_allowed=True and no single recipient can hold the full bulk load
+    # (e.g., 6 pallets of farm potatoes), promote the multi-stop split stops if
+    # their combined capacity safely covers the entire load.
+    if not eligible and pallet_split_plan:
+        split_ids = {s["recipient_id"] for s in pallet_split_plan["stops"]}
+        split_Stop_map = {
+            s["recipient_id"]: s["allocated_pallets"] for s in pallet_split_plan["stops"]
+        }
+        promoted: list[CandidateEvaluation] = []
+        still_rejected: list[CandidateEvaluation] = []
+        for item in evaluations:
+            if item.recipient_id in split_ids:
+                alloc = split_Stop_map[item.recipient_id]
+                promoted.append(
+                    CandidateEvaluation(
+                        recipient_id=item.recipient_id,
+                        name=item.name,
+                        eligible=True,
+                        reasons=(),
+                        warnings=item.warnings,
+                        distance_miles=item.distance_miles,
+                        travel_time_hours=item.travel_time_hours,
+                        time_margin_hours=item.time_margin_hours,
+                        capacity_margin_pallets=item.candidate.max_pallets - alloc,
+                        semantic_distance=item.semantic_distance,
+                        need_score=item.need_score,
+                        candidate=item.candidate,
+                    )
+                )
+            elif not item.eligible:
+                still_rejected.append(item)
+        eligible = sorted(promoted, key=_ranking_key)
+        rejected = still_rejected
+
     recommendations = [_recommendation(item, parsed) for item in eligible[:3]]
     if len(eligible) >= 2 and _operationally_tied(eligible[0], eligible[1]):
         recommendations[0]["selection_reason"] += (
             f" Operationally tied with {eligible[1].name}; selected using the explicit "
             f"need tie-break ({eligible[0].need_score:.2f} vs "
             f"{eligible[1].need_score:.2f})."
+        )
+    if recommendations and pallet_split_plan:
+        recommendations[0]["pallet_split_plan"] = pallet_split_plan
+        lead_stop = pallet_split_plan["stops"][0]
+        recommendations[0]["selection_reason"] += (
+            f" Multi-stop split enabled: allocates {parsed.quantity_pallets:g} pallets across "
+            f"{pallet_split_plan['stops_count']} high-need recipients (Lead stop receives "
+            f"{lead_stop['allocated_pallets']:g} pallets)."
         )
     no_match = not recommendations
     best = recommendations[0] if recommendations else None
@@ -307,9 +450,9 @@ def match_surplus(
             for warning in item.warnings
         )
     )
-    if parsed.split_allowed:
+    if parsed.split_allowed and not pallet_split_plan:
         result_warnings.append(
-            "split_allowed_is_not_used:every_recommendation_must_hold_the_full_offer"
+            "split_allowed_single_stop_used:single_recipient_holds_full_offer"
         )
     outreach = None
     if best:
@@ -375,41 +518,74 @@ def build_bigquery_candidate_provider(
 
     bq_client = client or bigquery.Client(project=project)
     table_id = f"{project}.{dataset_name}.recipient_embeddings"
+    tract_table_id = f"{project}.{dataset_name}.tract_demographics"
     sql = f"""
-    SELECT
-      CAST(base.recipient_id AS STRING) AS recipient_id,
-      base.name,
-      base.street,
-      base.city,
-      base.state,
-      base.zip_code,
-      base.ein,
-      base.ntee_code,
-      base.archetype,
-      base.archetype_label,
-      base.cold_storage,
-      base.frozen_storage,
-      base.loading_dock,
-      base.refrigerated_transport,
-      base.max_pallets,
-      base.pickup_window_hours,
-      base.weekly_households,
-      base.reported_income,
-      base.populations_served,
-      base.service_days,
-      base.profile_text,
-      base.profile_source,
-      base.latitude,
-      base.longitude,
-      distance AS semantic_distance
-    FROM VECTOR_SEARCH(
-      TABLE `{table_id}`,
-      'embedding',
-      (SELECT AI.EMBED(@posting_text, endpoint => 'gemini-embedding-2').result AS embedding),
-      top_k => 30,
-      distance_type => 'COSINE',
-      options => '{{"use_brute_force":true}}'
+    WITH candidates AS (
+      SELECT
+        CAST(base.recipient_id AS STRING) AS recipient_id,
+        base.name,
+        base.street,
+        base.city,
+        base.state,
+        base.zip_code,
+        base.ein,
+        base.ntee_code,
+        base.archetype,
+        base.archetype_label,
+        base.cold_storage,
+        base.frozen_storage,
+        base.loading_dock,
+        base.refrigerated_transport,
+        base.max_pallets,
+        base.pickup_window_hours,
+        base.weekly_households,
+        base.reported_income,
+        base.populations_served,
+        base.service_days,
+        base.profile_text,
+        base.profile_source,
+        base.latitude,
+        base.longitude,
+        distance AS semantic_distance
+      FROM VECTOR_SEARCH(
+        TABLE `{table_id}`,
+        'embedding',
+        (SELECT AI.EMBED(@posting_text, endpoint => 'gemini-embedding-2').result AS embedding),
+        top_k => 30,
+        distance_type => 'COSINE',
+        options => '{{"use_brute_force":true}}'
+      )
     )
+    SELECT
+      c.*,
+      t.geo_id AS tract_geo_id,
+      ROUND(t.poverty_rate, 3) AS tract_poverty_rate,
+      ROUND(t.no_vehicle_rate, 3) AS tract_no_vehicle_rate,
+      ROUND(t.assistance_rate, 3) AS tract_assistance_rate,
+      ROUND(t.median_income, 0) AS tract_median_income,
+      CASE
+        WHEN t.geo_id IS NOT NULL THEN ROUND(
+          0.35 * COALESCE(t.poverty_rate, 0)
+          + 0.25 * COALESCE(t.no_vehicle_rate, 0)
+          + 0.15 * COALESCE(t.assistance_rate, 0)
+          + 0.25 * GREATEST(0.0, LEAST(1.0, (90000.0 - COALESCE(t.median_income, 55000.0)) / 70000.0)),
+          3
+        )
+        ELSE NULL
+      END AS need_score
+    FROM candidates c
+    LEFT JOIN `{tract_table_id}` t
+      ON c.latitude IS NOT NULL
+     AND t.tract_lat IS NOT NULL
+     AND t.total_pop > 0
+     AND t.median_income > 0
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY c.recipient_id
+      ORDER BY ST_DISTANCE(
+        ST_GEOGPOINT(c.longitude, c.latitude),
+        ST_GEOGPOINT(t.tract_lon, t.tract_lat)
+      ) ASC
+    ) = 1
     ORDER BY semantic_distance
     LIMIT 30
     """

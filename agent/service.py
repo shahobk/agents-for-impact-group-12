@@ -12,7 +12,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .agent import MatcherUnavailableError, match_surplus_offer, root_agent
+from .agent import (
+    MatcherUnavailableError,
+    check_fda_food_recalls,
+    google_search_food_and_pantry_info,
+    list_surplus_postings,
+    lookup_shelf_life,
+    match_surplus_offer,
+    onboard_new_pantry,
+    root_agent,
+    run_metro_equity_audit,
+)
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -157,6 +167,94 @@ async def create_match(request: MatchRequest) -> dict[str, Any]:
             status_code=503,
             detail="The matching service is temporarily unavailable.",
         ) from exc
+
+
+@app.get("/api/postings", tags=["matching"])
+async def get_postings(track: str = "") -> dict[str, Any]:
+    """List surplus food postings from BigQuery (`a4i_food.surplus_postings`) or local fallback."""
+    return list_surplus_postings(track=track)
+
+
+@app.get("/api/equity-audit", tags=["equity"])
+async def get_equity_audit(volunteer_driver_available: bool = True) -> dict[str, Any]:
+    """Run the 10-posting Metro Equity Outcome Audit comparing the broker to Metro and Naive baselines."""
+    return run_metro_equity_audit(volunteer_driver_available=volunteer_driver_available)
+
+
+@app.get("/api/shelf-life", tags=["safety"])
+async def get_shelf_life(
+    food_query: str,
+    storage_state: str = "refrigerated",
+    donor_hours_available: float = 24.0,
+    is_sealed: bool = True,
+    elapsed_hours: float = 0.0,
+) -> dict[str, Any]:
+    """Compute USDA FoodKeeper biological shelf life and binding clock constraint."""
+    return lookup_shelf_life(
+        food_item=food_query,
+        storage_state=storage_state,
+        donor_hours_available=donor_hours_available,
+        is_sealed=is_sealed,
+        elapsed_hours=elapsed_hours,
+    )
+
+
+@app.get("/api/recalls", tags=["safety"])
+async def get_fda_recalls(food_item: str, state: str = "GA") -> dict[str, Any]:
+    """Check the live openFDA Food Enforcement API for ongoing recalls."""
+    return check_fda_food_recalls(food_item=food_item, state=state)
+
+
+class OnboardPantryRequest(BaseModel):
+    """Conversational or form-based intake for a new community recipient."""
+
+    name: str = Field(min_length=2, max_length=200)
+    street: str = Field(min_length=2, max_length=200)
+    city: str = "Atlanta"
+    zip_code: str = "30310"
+    cold_storage: str = "walk-in"
+    frozen_storage: bool = False
+    loading_dock: bool = False
+    refrigerated_transport: bool = False
+    max_pallets: int = 2
+    pickup_window_hours: int = 4
+    weekly_households: int = 350
+    populations_served: str = "Low-income families, seniors, and children"
+    service_days: str = "Monday, Tuesday, Wednesday, Thursday, Friday"
+    profile_description: str = (
+        "Neighborhood pantry with commercial walk-in cooler serving families in Southwest Atlanta."
+    )
+    latitude: float = 33.7250
+    longitude: float = -84.4170
+
+
+@app.get("/api/google-search", tags=["safety"])
+async def get_google_search_info(query: str) -> dict[str, Any]:
+    """Search Google (via Gemini Google Search Grounding) for unlisted food safety or pantry info."""
+    return google_search_food_and_pantry_info(query=query)
+
+
+@app.post("/api/onboard", tags=["intake"])
+async def create_pantry_onboarding(request: OnboardPantryRequest) -> dict[str, Any]:
+    """Onboard a new community pantry into BigQuery (`recipients` + `recipient_embeddings` via AI.EMBED)."""
+    return onboard_new_pantry(
+        name=request.name,
+        street=request.street,
+        city=request.city,
+        zip_code=request.zip_code,
+        cold_storage=request.cold_storage,
+        frozen_storage=request.frozen_storage,
+        loading_dock=request.loading_dock,
+        refrigerated_transport=request.refrigerated_transport,
+        max_pallets=request.max_pallets,
+        pickup_window_hours=request.pickup_window_hours,
+        weekly_households=request.weekly_households,
+        populations_served=request.populations_served,
+        service_days=request.service_days,
+        profile_description=request.profile_description,
+        latitude=request.latitude,
+        longitude=request.longitude,
+    )
 
 
 # Keep the demo deployable as one Cloud Run service. API routes are registered

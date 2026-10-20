@@ -132,7 +132,14 @@ class RecipientCandidate:
     transport_available: bool | None = None
     populations_served: str = ""
     archetype: str = ""
+    archetype_label: str = ""
     profile_source: str = ""
+    loading_dock: bool = False
+    tract_geo_id: str = ""
+    tract_poverty_rate: float | None = None
+    tract_no_vehicle_rate: float | None = None
+    tract_assistance_rate: float | None = None
+    tract_median_income: float | None = None
 
     @classmethod
     def from_value(
@@ -173,7 +180,14 @@ class RecipientCandidate:
             ),
             populations_served=str(value.get("populations_served", "") or ""),
             archetype=str(value.get("archetype", "") or ""),
+            archetype_label=str(value.get("archetype_label", "") or ""),
             profile_source=str(value.get("profile_source", "") or ""),
+            loading_dock=bool(value.get("loading_dock", False)),
+            tract_geo_id=str(value.get("tract_geo_id", "") or ""),
+            tract_poverty_rate=_optional_float(value.get("tract_poverty_rate")),
+            tract_no_vehicle_rate=_optional_float(value.get("tract_no_vehicle_rate")),
+            tract_assistance_rate=_optional_float(value.get("tract_assistance_rate")),
+            tract_median_income=_optional_float(value.get("tract_median_income")),
         )
 
 

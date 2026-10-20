@@ -2,10 +2,14 @@
 .gitignore
 .pytest_cache
 .venv
+.adk
 __pycache__
 *.py[cod]
 *.ipynb
-data
+.env
+agent/.env
+data/*.csv
+data/*.parquet
 docs
 notebooks
 scripts

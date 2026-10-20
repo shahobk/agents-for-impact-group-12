@@ -109,3 +109,20 @@ def test_invalid_request_fails_before_provider_call():
             request("bread", "ambient", 4, quantity=0),
             lambda *_args, **_kwargs: pytest.fail("provider should not run"),
         )
+
+
+
+def test_split_allowed_promotes_multi_stop_pallet_split_for_large_farm_load():
+    req = {
+        **request("5 tons of loose Russet potatoes in bulk bins", "ambient", 24, quantity=6),
+        "split_allowed": True,
+    }
+    result = match_surplus(req, provider_for("bread"))
+
+    assert result["no_match"] is False
+    assert result["best"] is not None
+    split_plan = result["best"].get("pallet_split_plan")
+    assert split_plan is not None
+    assert split_plan["total_pallets"] == 6
+    assert split_plan["stops_count"] >= 2
+    assert sum(s["allocated_pallets"] for s in split_plan["stops"]) == pytest.approx(6.0)

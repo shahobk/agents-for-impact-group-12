@@ -922,3 +922,515 @@ footer {
     transition-duration: 0.01ms !important;
   }
 }
+
+
+/* Scenario Preset Chips & BigQuery Posting Selector */
+.result-panel {
+  position: static;
+}
+
+.preset-section {
+  margin-bottom: 22px;
+  padding: 14px;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.preset-label {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.preset-chip {
+  padding: 6px 11px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  transition: all 140ms ease;
+}
+
+.preset-chip:hover {
+  color: white;
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.preset-chip-warn {
+  color: var(--red);
+  border-color: rgba(163, 59, 52, 0.35);
+  background: #fff7f5;
+}
+
+.preset-chip-warn:hover {
+  color: white;
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.posting-picker-row {
+  margin-top: 6px;
+}
+
+.posting-select {
+  width: 100%;
+  padding: 8px 10px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.74rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+/* Operational Badges & Reroute Bar inside Selected Card */
+.op-details {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(24, 50, 42, 0.1);
+}
+
+.op-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.op-pill {
+  padding: 4px 9px;
+  color: var(--green-dark);
+  background: #e3ece5;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 740;
+}
+
+.op-meta {
+  margin: 9px 0 0;
+  color: #354c43;
+  font-size: 0.72rem;
+}
+
+.op-profile {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.71rem;
+  font-style: italic;
+}
+
+.reroute-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: #ece8dc;
+  border-radius: 10px;
+  font-size: 0.73rem;
+  font-weight: 700;
+}
+
+.reroute-button {
+  padding: 7px 12px;
+  color: white;
+  background: var(--amber);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.71rem;
+  font-weight: 760;
+  transition: opacity 140ms ease;
+}
+
+.reroute-button:hover {
+  opacity: 0.9;
+}
+
+.reroute-banner {
+  margin-bottom: 12px;
+  padding: 10px 13px;
+  color: var(--ink);
+  background: var(--lime);
+  border-radius: 11px;
+  font-size: 0.74rem;
+}
+
+/* Full Agent Reply Box */
+.agent-reply-box {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 14px 16px;
+  color: #eaf2ee;
+  background: rgba(10, 24, 19, 0.75);
+  border: 1px solid rgba(201, 220, 116, 0.28);
+  border-radius: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.71rem;
+  line-height: 1.52;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mini-copy-btn {
+  padding: 4px 10px;
+  color: var(--ink);
+  background: var(--lime);
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.65rem;
+  font-weight: 780;
+}
+
+/* Judge Evidence Cards (Spoilage Clock, FDA, Census Tract Equity, Split Plan) */
+.judge-card {
+  padding: 15px;
+  background: rgba(255, 255, 255, 0.065);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+}
+
+.judge-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.judge-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.judge-stat {
+  display: grid;
+  gap: 2px;
+  padding: 10px 11px;
+  background: rgba(255, 255, 255, 0.055);
+  border-radius: 9px;
+}
+
+.judge-stat-label {
+  color: #9eb0a9;
+  font-size: 0.6rem;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.judge-stat strong {
+  color: #f9fbf9;
+  font-size: 0.92rem;
+}
+
+.judge-stat small {
+  color: #b8c6c0;
+  font-size: 0.64rem;
+}
+
+.fda-status-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 11px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 0.71rem;
+}
+
+.fda-status-row p {
+  margin: 2px 0 0;
+  color: #cad6d0;
+  font-size: 0.66rem;
+}
+
+.fda-clear {
+  background: rgba(23, 107, 77, 0.35);
+  border: 1px solid rgba(201, 220, 116, 0.35);
+}
+
+.fda-alert {
+  background: rgba(163, 59, 52, 0.35);
+  border: 1px solid rgba(248, 222, 217, 0.4);
+}
+
+.fda-pill {
+  flex: none;
+  padding: 4px 8px;
+  color: var(--ink);
+  background: var(--lime);
+  border-radius: 999px;
+  font-size: 0.63rem;
+  font-weight: 800;
+}
+
+.clock-tips {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 0.68rem;
+  color: #d6e1dc;
+}
+
+.clock-tips ul {
+  margin: 4px 0 0;
+  padding-left: 17px;
+}
+
+.grounding-sources {
+  margin-top: 8px;
+  font-size: 0.66rem;
+  color: var(--lime);
+}
+
+.grounding-sources a {
+  color: var(--lime);
+  text-decoration: underline;
+}
+
+.split-method {
+  margin: 0 0 10px;
+  color: #c9d6d0;
+  font-size: 0.69rem;
+}
+
+.split-table-wrap,
+.audit-table-wrap {
+  overflow-x: auto;
+}
+
+.split-table,
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.69rem;
+  text-align: left;
+}
+
+.split-table th,
+.split-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.split-table th {
+  color: var(--lime);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+
+/* Expanded No-Match / Safety Guardrail View */
+.no-match-state-expanded {
+  padding: 10px 0;
+}
+
+.no-match-header {
+  text-align: center;
+  margin-bottom: 18px;
+}
+
+.no-match-header h3 {
+  margin: 14px auto 8px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.65rem;
+  font-weight: 500;
+}
+
+.no-match-header p {
+  max-width: 480px;
+  margin: 0 auto;
+  color: #c7d3ce;
+  font-size: 0.82rem;
+}
+
+.safety-block-banner {
+  margin: 12px 0;
+  padding: 12px 14px;
+  color: #ffe3de;
+  background: rgba(163, 59, 52, 0.42);
+  border: 1px solid rgba(248, 222, 217, 0.45);
+  border-radius: 10px;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+/* Section 03: Judge Verification Suite */
+.judge-suite {
+  margin-top: 36px;
+}
+
+.judge-suite-header {
+  margin-bottom: 18px;
+}
+
+.judge-suite-header h2 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(1.65rem, 2.8vw, 2.3rem);
+  font-weight: 500;
+  letter-spacing: -0.035em;
+}
+
+.judge-suite-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+
+.judge-panel {
+  padding: clamp(22px, 2.8vw, 32px);
+}
+
+.judge-panel h3 {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.4rem;
+  font-weight: 500;
+}
+
+.judge-panel-desc {
+  margin: -12px 0 18px;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.secondary-button {
+  padding: 10px 15px;
+  color: white;
+  background: var(--green);
+  border: 0;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 760;
+}
+
+.secondary-button:hover {
+  background: var(--green-dark);
+}
+
+.secondary-button-full {
+  width: 100%;
+  padding: 13px 16px;
+}
+
+.muted-placeholder {
+  margin: 0;
+  padding: 18px;
+  color: var(--ink-soft);
+  background: var(--surface-muted);
+  border-radius: 10px;
+  font-size: 0.76rem;
+  text-align: center;
+}
+
+.audit-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.audit-card {
+  padding: 12px;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  font-size: 0.72rem;
+}
+
+.audit-card-highlight {
+  background: var(--green-light);
+  border-color: var(--green);
+}
+
+.audit-tag {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--green-dark);
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.audit-card strong {
+  font-size: 0.82rem;
+}
+
+.audit-card p {
+  margin: 4px 0 0;
+}
+
+.audit-table th,
+.audit-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.audit-table th {
+  color: var(--green-dark);
+  font-size: 0.63rem;
+  text-transform: uppercase;
+}
+
+.onboard-success-card {
+  margin-top: 14px;
+  padding: 14px;
+  background: var(--green-light);
+  border: 1px solid var(--green);
+  border-radius: 11px;
+  font-size: 0.75rem;
+}
+
+.onboard-success-card p {
+  margin: 6px 0 10px;
+}
+
+.error-inline {
+  color: var(--red);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+@media (max-width: 860px) {
+  .judge-suite-grid {
+    grid-template-columns: 1fr;
+  }
+  .audit-cards,
+  .judge-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
