@@ -18,7 +18,14 @@
     data: null,
     selectedOfferId: "",
     reservation: null,
-    demoRecipients: [],
+    demoRecipients: readSessionJson("pantry-relay:demo-recipients", []),
+    draftMeta: { inferredFields: [], warnings: [], source: null },
+    offerLocation: null,
+    recognition: null,
+    captureMode: "type",
+    publicSummary: null,
+    commandKeys: new Map(),
+    equityAudit: null,
   };
 
   captureFragmentToken();
@@ -49,6 +56,7 @@
   }
 
   function setRole(role, updateUrl = true) {
+    stopSpeechCapture();
     stopPolling();
     state.role = normalizeRole(role);
     state.data = null;
@@ -75,83 +83,327 @@
   }
 
   function renderDonorForm() {
+    stopSpeechCapture();
     workspace.innerHTML = `
-      <section class="hero compact">
-        <p class="eyebrow">Donor workspace</p>
-        <h1>Move good food while it is still good.</h1>
-        <p>Review every detail before sending it to up to three pre-approved Atlanta recipients.</p>
-      </section>
-      <section class="panel form-panel" aria-labelledby="offer-title">
-        <div class="section-heading">
-          <div><p class="kicker">New rescue offer</p><h2 id="offer-title">Describe the handoff</h2></div>
-          <button class="button quiet" id="load-demo" type="button">Load spinach scenario</button>
+      <section class="hero demo-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Atlanta grocery rescue pilot</p>
+          <h1>Ten crates. Six hours. One safe handoff.</h1>
+          <p>Pantry Relay finds likely recipients, rejects unsafe options with deterministic rules, and protects the first qualified acceptance.</p>
+          <div class="hero-actions"><button class="button primary hero-button" id="run-demo" type="button">Run the spinach rescue <span aria-hidden="true">→</span></button><a class="button-link" href="#capture">Create a different offer</a></div>
         </div>
-        <form id="offer-form">
-          <div class="field full">
-            <label for="description">Food description</label>
-            <textarea id="description" name="description" required rows="3" placeholder="10 crates of fresh spinach, bagged and refrigerated"></textarea>
-            <small>Include packaging, visible condition, and any label dates. Food-safety decisions are never inferred.</small>
-          </div>
-          <div class="form-grid thirds">
-            <div class="field"><label for="quantity-original">Donor wording</label><input id="quantity-original" name="quantity_original" required placeholder="10 crates" /></div>
-            <div class="field"><label for="quantity-pallets">Confirmed pallet estimate</label><input id="quantity-pallets" name="quantity_pallets" required type="number" min="0.1" step="0.1" value="1" /></div>
-            <div class="field"><label for="deadline">Must move by</label><input id="deadline" name="pickup_deadline" required type="datetime-local" /></div>
-          </div>
-          <fieldset class="field"><legend>Required storage</legend><div class="choice-row">
-            ${radio("storage_state", "refrigerated", "Refrigerated", true)}
-            ${radio("storage_state", "frozen", "Frozen")}
-            ${radio("storage_state", "ambient", "Shelf stable")}
-          </div></fieldset>
-          <div class="location-review">
-            <div class="section-heading small"><div><p class="kicker">Pickup point</p><h3>Share only what is needed</h3></div><button class="button secondary" id="use-location" type="button">Use my location</button></div>
-            <div class="field full"><label for="pickup-address">Address or store label</label><input id="pickup-address" name="pickup_address" autocomplete="street-address" required placeholder="Downtown Atlanta grocery store" /></div>
-            <div class="form-grid">
-              <div class="field"><label for="latitude">Reviewed latitude</label><input id="latitude" name="donor_latitude" type="number" min="-90" max="90" step="any" required placeholder="33.749" /></div>
-              <div class="field"><label for="longitude">Reviewed longitude</label><input id="longitude" name="donor_longitude" type="number" min="-180" max="180" step="any" required placeholder="-84.388" /></div>
-            </div>
-            <input id="location-source" name="location_source" type="hidden" value="address" />
-            <p class="notice neutral">Exact donor coordinates stay hidden from recipients until a valid claim. Address entry remains available if GPS is declined.</p>
-          </div>
-          <fieldset class="field"><legend>Transport plan</legend><div class="transport-grid">
-            ${radio("transport_mode", "recipient_pickup", "Recipient pickup", true, "Recipient reconfirms cold-chain transport.")}
-            ${radio("transport_mode", "donor_delivery", "Donor delivery", false, "Limited to 5 km in this release.")}
-            ${radio("transport_mode", "transportation_needed", "Transport needed", false, "Blocks confirmation until safely resolved.")}
-          </div></fieldset>
-          <div class="field radius-field" hidden><label for="delivery-radius">Delivery radius (km, maximum 5)</label><input id="delivery-radius" name="donor_delivery_radius_km" type="number" min="0.1" max="5" step="0.1" value="5" /></div>
-          <label class="review-check"><input name="reviewed" type="checkbox" required /><span><strong>I reviewed the quantity, storage, location, transport, and deadline.</strong><small>The deadline I entered is authoritative; any FoodKeeper context is advisory.</small></span></label>
-          <div id="form-error" class="notice danger" role="alert" hidden></div>
-          <button class="button primary wide" type="submit">Start safe matching <span aria-hidden="true">→</span></button>
-        </form>
+        ${landingMap()}
+      </section>
+      <section class="proof-rail" aria-label="How Pantry Relay works">
+        <div><strong>30</strong><span>semantic candidates</span></div><div><strong>≤3</strong><span>notified per wave</span></div><div><strong>10 min</strong><span>protected hold</span></div><div><strong>1</strong><span>shared workflow</span></div>
+      </section>
+      <p class="impact-context"><strong>Impact starts at completion.</strong> Offers and temporary holds are food at risk—not food rescued.</p>
+      <section class="public-impact" aria-label="Demo environment impact"><div><span id="public-completed">—</span><small>completed rescues</small></div><div><span id="public-pallets">—</span><small>completed pallets</small></div><div><span id="public-active">—</span><small>active offers</small></div><p id="public-scope">Authoritative workflow counts for this demo environment; not live recipient operations.</p></section>
+      <section class="panel capture-panel" id="capture" aria-labelledby="capture-title">
+        <div class="section-heading">
+          <div><p class="kicker">Offer intake</p><h2 id="capture-title">Tell us what needs a home</h2><p class="muted">Speak, add a photo, or type. Nothing is submitted until you review every field.</p></div>
+        </div>
+        <div class="capture-methods" role="group" aria-label="Offer capture method"><button class="capture-method active" data-mode="type" type="button"><span aria-hidden="true">Aa</span><strong>Type</strong><small>Describe the food</small></button><button class="capture-method" id="speak-offer" data-mode="speak" type="button"><span aria-hidden="true">◉</span><strong>Speak</strong><small>No audio retained</small></button><label class="capture-method" for="photo-offer"><input id="photo-offer" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" /><span aria-hidden="true">▧</span><strong>Photo</strong><small>Take or upload</small></label></div>
+        <div class="field capture-text"><label for="offer-text">Food and quantity</label><textarea id="offer-text" rows="4" placeholder="For example: 10 crates of bagged spinach, refrigerated, must move by 8 p.m."></textarea><small id="capture-help">Include packaging, visible condition, storage, and any label dates. Pantry Relay never infers food safety.</small></div>
+        <div id="capture-status" class="capture-status" role="status" aria-live="polite"></div>
+        <button class="button primary wide" id="review-offer" type="button">Create editable draft <span aria-hidden="true">→</span></button>
       </section>`;
-
-    const form = workspace.querySelector("#offer-form");
-    workspace.querySelector("#load-demo").addEventListener("click", () => loadDemo(form));
-    workspace.querySelector("#use-location").addEventListener("click", () => useLocation(form));
-    form.addEventListener("change", (event) => {
-      if (event.target.name === "transport_mode") {
-        form.querySelector(".radius-field").hidden = event.target.value !== "donor_delivery";
-      }
+    workspace.querySelector("#run-demo").addEventListener("click", loadDemo);
+    workspace.querySelector("#review-offer").addEventListener("click", interpretOfferText);
+    workspace.querySelector("#speak-offer").addEventListener("click", startSpeechCapture);
+    workspace.querySelector("#photo-offer").addEventListener("change", analyzeOfferPhoto);
+    workspace.querySelector("[data-mode=type]").addEventListener("click", () => {
+      state.captureMode = "type";
+      workspace.querySelector("#offer-text").focus();
     });
-    form.addEventListener("submit", submitOffer);
+    loadPublicSummary();
   }
 
   function radio(name, value, label, checked = false, help = "") {
-    return `<label class="choice"><input type="radio" name="${name}" value="${value}" ${checked ? "checked" : ""}/><span><strong>${label}</strong>${help ? `<small>${help}</small>` : ""}</span></label>`;
+    return `<label class="choice"><input type="radio" name="${name}" value="${value}" required ${checked ? "checked" : ""}/><span><strong>${label}</strong>${help ? `<small>${help}</small>` : ""}</span></label>`;
   }
 
-  function loadDemo(form) {
+  function landingMap(review = false) {
+    return `<div class="city-map-card ${review ? "review-map" : ""}" aria-label="Illustrative Atlanta recipient coverage map"><div class="map-topline"><span>Atlanta rescue coverage</span><span class="map-live"><i></i> Demo network</span></div><div class="city-map" aria-hidden="true"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span><span class="coverage-ring"></span><span class="map-dot donor"></span><span class="map-dot recipient one"></span><span class="map-dot recipient two"></span><span class="map-dot recipient three"></span></div><div class="map-legend"><span><i class="legend-donor"></i>Generated demo anchor</span><span><i class="legend-recipient"></i>Approximate recipient area</span></div><p>Estimated logistics—not live vehicle tracking. Exact pickup details stay private until a valid claim.</p></div>`;
+  }
+
+  async function loadPublicSummary() {
+    try {
+      const summary = await api("/api/public/summary", { token: null });
+      state.publicSummary = summary;
+      const activity = summary.activity || {};
+      const impact = summary.impact || {};
+      const completed = workspace.querySelector("#public-completed");
+      const palletsMoved = workspace.querySelector("#public-pallets");
+      const active = workspace.querySelector("#public-active");
+      const scope = workspace.querySelector("#public-scope");
+      if (completed) completed.textContent = formatNumber(impact.completed_offers ?? 0);
+      if (palletsMoved) palletsMoved.textContent = formatNumber(impact.completed_quantity_pallets ?? 0);
+      if (active) active.textContent = formatNumber(activity.active_offers ?? 0);
+      if (scope) scope.textContent = "Authoritative workflow counts for this demo environment; generated recipient profiles and no external live-capacity feed.";
+    } catch (_err) {
+      const scope = workspace.querySelector("#public-scope");
+      if (scope) scope.textContent = "Workflow totals are temporarily unavailable. No live recipient-capacity feed is connected.";
+    }
+  }
+
+  function workflowMap(map, titleText = "Offer logistics") {
+    if (!map) return "";
+    const donor = map.donor;
+    const recipients = arrayOf(map.recipients);
+    const markers = recipients.slice(0, 8).map((recipient, index) => {
+      const point = mapPoint(recipient.latitude, recipient.longitude);
+      return point ? `<span class="workflow-point recipient-point" style="left:${point.x}%;top:${point.y}%" title="${e(recipient.name || `Recipient ${index + 1}`)}" aria-hidden="true"></span>` : "";
+    }).join("");
+    const donorPoint = donor ? mapPoint(donor.latitude, donor.longitude) : null;
+    const limitations = arrayOf(map.limitations).join(" ");
+    const routes = recipients.filter((recipient) => recipient.distance_miles != null).slice(0, 3).map((recipient) => {
+      const source = recipient.route_source === "google_routes" ? "Google Routes estimate" : "Haversine estimate";
+      const duration = recipient.estimated_minutes == null ? "" : ` · ${formatNumber(recipient.estimated_minutes)} min`;
+      return `<li><span>${e(recipient.name || recipient.recipient_id)}</span><strong>${e(formatNumber(recipient.distance_miles))} mi${e(duration)}</strong><small>${e(source)}${recipient.traffic_aware ? " · traffic-aware" : " · not live traffic"}</small></li>`;
+    }).join("");
+    const donorLabel = donor ? (donor.label || (donor.precision === "reviewed_address_candidate" ? "Reviewed address candidate" : "Reviewed donor pin")) : "Donor pin private";
+    return `<section class="workflow-map-card" aria-label="${e(titleText)}"><div class="map-topline"><span>${e(titleText)}</span><span class="map-live"><i></i> Estimated logistics</span></div><div class="workflow-map" aria-hidden="true"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span>${markers}${donorPoint ? `<span class="workflow-point donor-point" style="left:${donorPoint.x}%;top:${donorPoint.y}%"></span>` : ""}</div><div class="map-legend"><span><i class="legend-donor"></i>${e(donorLabel)}</span><span><i class="legend-recipient"></i>Approximate recipient area</span></div>${routes ? `<ul class="workflow-routes">${routes}</ul>` : ""}<p>${e(limitations || "Recipient locations and route values are approximate. This is not live tracking.")}</p></section>`;
+  }
+
+  function mapPoint(latitude, longitude) {
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return {
+      x: Math.max(3, Math.min(97, ((lng + 84.55) / .32) * 100)),
+      y: Math.max(4, Math.min(96, ((33.91 - lat) / .3) * 100)),
+    };
+  }
+
+  function interactivePinMap() {
+    return `<button class="pin-map" id="pin-map" type="button" aria-label="Place or adjust the pickup pin on an illustrative Atlanta map" aria-describedby="pin-map-help"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span><span id="reviewed-pin" class="reviewed-pin" aria-hidden="true"></span><span class="pin-instruction">Click, tap, or press Enter to place pin</span></button><small id="pin-map-help" class="map-keyboard-help">Keyboard activation places the pin at the center of this illustrative Atlanta map.</small>`;
+  }
+
+  function setMapPin(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const keyboardActivation = event.detail === 0 || (event.clientX === 0 && event.clientY === 0);
+    const x = keyboardActivation ? .5 : Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const y = keyboardActivation ? .5 : Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+    state.offerLocation = {
+      latitude: 33.83 - y * 0.13,
+      longitude: -84.48 + x * 0.18,
+      source: "corrected_pin",
+    };
+    positionMapPin();
+    updateLocationSummary();
+  }
+
+  function positionMapPin() {
+    const pin = workspace.querySelector("#reviewed-pin");
+    if (!pin) return;
+    if (!state.offerLocation) { pin.hidden = true; return; }
+    const x = (state.offerLocation.longitude + 84.48) / 0.18;
+    const y = (33.83 - state.offerLocation.latitude) / 0.13;
+    pin.hidden = false;
+    pin.style.left = `${Math.max(2, Math.min(98, x * 100))}%`;
+    pin.style.top = `${Math.max(4, Math.min(96, y * 100))}%`;
+  }
+
+  function locationReviewLabel() {
+    const labels = { gps: "GPS location reviewed. Click the map to correct the pin.", corrected_pin: "Map pin reviewed. Click again to adjust.", address: "Address pin reviewed. Click the map to adjust." };
+    return labels[state.offerLocation?.source] || "Pickup pin reviewed.";
+  }
+
+  function updateLocationSummary() {
+    const summary = workspace.querySelector("#location-summary");
+    if (summary) summary.textContent = locationReviewLabel();
+  }
+
+  function inferredTag(inferred, field) {
+    return inferred.has(field) ? `<span class="inferred-tag">Suggested · review</span>` : "";
+  }
+
+  function draftWarnings() {
+    const warnings = state.draftMeta.warnings;
+    const photoNote = state.draftMeta.source?.photo_retained === false
+      ? `<div class="notice neutral"><strong>${state.draftMeta.source?.photo_analyzed ? "Photo analyzed." : "Photo handled transiently."}</strong> It was used only to suggest this draft and is not retained by Pantry Relay.</div>` : "";
+    return `${photoNote}${warnings.map((warning) => `<div class="notice warning">${e(warning)}</div>`).join("")}`;
+  }
+
+  function localDateTimeValue(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+    return date.toISOString().slice(0, 16);
+  }
+
+  function setCaptureStatus(message, danger = false) {
+    const status = workspace.querySelector("#capture-status");
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle("danger", danger);
+  }
+
+  function fileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+      reader.onerror = () => reject(new Error("The photo could not be read."));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function loadDemo() {
     const deadline = new Date(Date.now() + 6 * 60 * 60 * 1000);
-    deadline.setMinutes(deadline.getMinutes() - deadline.getTimezoneOffset());
-    form.elements.description.value = "10 crates of fresh spinach, bagged and refrigerated";
-    form.elements.quantity_original.value = "10 crates";
-    form.elements.quantity_pallets.value = "1";
-    form.elements.pickup_deadline.value = deadline.toISOString().slice(0, 16);
-    form.elements.pickup_address.value = "Downtown Atlanta grocery store";
-    form.elements.donor_latitude.value = "33.749";
-    form.elements.donor_longitude.value = "-84.388";
-    form.elements.location_source.value = "corrected_pin";
-    form.elements.reviewed.checked = true;
-    form.elements.description.focus();
+    state.offerLocation = { latitude: 33.749, longitude: -84.388, source: "corrected_pin" };
+    state.draftMeta = {
+      inferredFields: ["description", "quantity_original", "quantity_pallets", "storage_state", "pickup_deadline", "transport_mode"],
+      warnings: ["Demo scenario: downtown Atlanta is a generated anchor, not a live grocer location."],
+      source: { provider: "demo_scenario", photo_analyzed: false, photo_retained: null },
+    };
+    renderDonorReview({ description: "10 crates of fresh spinach, bagged and refrigerated", quantity_original: "10 crates", quantity_pallets: 1, storage_state: "refrigerated", pickup_deadline: deadline.toISOString(), transport_mode: "recipient_pickup", pickup_address: "Downtown Atlanta demo grocery" });
+  }
+
+  async function interpretOfferText() {
+    const text = workspace.querySelector("#offer-text").value.trim();
+    if (!text) return setCaptureStatus("Describe the food before creating a draft.", true);
+    const button = workspace.querySelector("#review-offer");
+    setBusy(button, true, "Creating draft…");
+    try {
+      const body = state.captureMode === "speech" ? { transcript: text } : { text };
+      const result = await api("/api/intake/extract", { method: "POST", body, token: null });
+      adoptDraft(result, { description: text });
+    } catch (err) {
+      setCaptureStatus(`${errorMessage(err)} Your description is still here.`, true);
+    } finally { setBusy(button, false); }
+  }
+
+  function startSpeechCapture() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return setCaptureStatus("Speech capture is not supported in this browser. Type your offer instead.", true);
+    if (state.recognition) return state.recognition.stop();
+    const button = workspace.querySelector("#speak-offer");
+    const recognition = new SpeechRecognition();
+    state.captureMode = "speech";
+    state.recognition = recognition;
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.continuous = false;
+    recognition.onstart = () => {
+      if (state.recognition !== recognition || !button.isConnected) return;
+      button.classList.add("listening");
+      setCaptureStatus("Listening… audio is processed by the browser and is not retained by Pantry Relay.");
+    };
+    recognition.onresult = (event) => {
+      if (state.recognition !== recognition) return;
+      const transcript = Array.from(event.results).map((result) => result[0].transcript).join(" ").trim();
+      const input = workspace.querySelector("#offer-text");
+      if (!input) return;
+      input.value = transcript;
+      setCaptureStatus("Transcript captured. Review the text, then create an editable draft.");
+    };
+    recognition.onerror = () => {
+      if (state.recognition === recognition) setCaptureStatus("Speech capture ended without a transcript. Type the offer instead.", true);
+    };
+    recognition.onend = () => {
+      if (state.recognition === recognition) state.recognition = null;
+      if (button.isConnected) button.classList.remove("listening");
+    };
+    recognition.start();
+  }
+
+  function stopSpeechCapture() {
+    const recognition = state.recognition;
+    if (!recognition) return;
+    state.recognition = null;
+    recognition.onstart = null;
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+    try { recognition.abort(); } catch (_err) { /* already stopped */ }
+    workspace.querySelector("#speak-offer")?.classList.remove("listening");
+  }
+
+  async function analyzeOfferPhoto(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) return setCaptureStatus("Choose a photo smaller than 5 MB.", true);
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return setCaptureStatus("Choose a JPEG, PNG, or WebP image.", true);
+    setCaptureStatus(`Reviewing ${file.name}… The photo will only produce an editable draft.`);
+    try {
+      const dataBase64 = await fileAsBase64(file);
+      const context = workspace.querySelector("#offer-text").value.trim();
+      const payload = { photo: { mime_type: file.type, data_base64: dataBase64 } };
+      if (context) payload.text = context;
+      const result = await api("/api/intake/extract", { method: "POST", body: payload, token: null });
+      adoptDraft(result, context ? { description: context } : {}, true);
+    } catch (err) {
+      setCaptureStatus(`${errorMessage(err)} The photo was not submitted as an offer.`, true);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function adoptDraft(result, fallback, photoUsed = false) {
+    const draft = { ...fallback, ...(result?.draft || {}) };
+    const responseSource = result?.source || (result ? { provider: result.provider, photo_analyzed: result.provider === "gemini", photo_retained: result.retained } : null);
+    state.draftMeta = {
+      inferredFields: arrayOf(result?.inferred_fields),
+      warnings: arrayOf(result?.warnings),
+      source: responseSource ? { ...responseSource, photo_retained: photoUsed ? responseSource.photo_retained : null } : null,
+    };
+    renderDonorReview(draft);
+  }
+
+  function renderDonorReview(draft) {
+    stopSpeechCapture();
+    const inferred = new Set(state.draftMeta.inferredFields);
+    const storage = draft.storage_state || "";
+    const transport = draft.transport_mode || "";
+    workspace.innerHTML = `
+      <section class="hero compact review-hero"><p class="eyebrow">Review before outreach</p><h1>Check the rescue details.</h1><p>Every inferred field is editable. Nothing has been sent to a recipient yet.</p></section>
+      <div class="review-layout">
+        <section class="panel form-panel" aria-labelledby="review-title"><div class="section-heading"><div><p class="kicker">Editable offer</p><h2 id="review-title">What recipients will evaluate</h2></div><button class="button quiet" id="back-to-capture" type="button">Start over</button></div>
+        ${draftWarnings()}
+        <form id="offer-form">
+          <div class="field"><label for="description">Food description ${inferredTag(inferred, "description")}</label><textarea id="description" name="description" required rows="3">${e(draft.description || "")}</textarea></div>
+          <div class="form-grid thirds"><div class="field"><label for="quantity-original">Quantity ${inferredTag(inferred, "quantity_original")}</label><input id="quantity-original" name="quantity_original" required value="${e(draft.quantity_original || "")}" placeholder="10 crates" /></div><div class="field"><label for="quantity-pallets">Pallet estimate ${inferredTag(inferred, "quantity_pallets")}</label><input id="quantity-pallets" name="quantity_pallets" required type="number" min="0.1" step="0.1" value="${e(draft.quantity_pallets ?? "")}" placeholder="1" /></div><div class="field"><label for="deadline">Must move by ${inferredTag(inferred, "pickup_deadline")}</label><input id="deadline" name="pickup_deadline" required type="datetime-local" value="${e(localDateTimeValue(draft.pickup_deadline))}" /></div></div>
+          <fieldset class="field"><legend>Required storage ${inferredTag(inferred, "storage_state")}</legend><div class="choice-row">${radio("storage_state", "refrigerated", "Refrigerated", storage === "refrigerated")}${radio("storage_state", "frozen", "Frozen", storage === "frozen")}${radio("storage_state", "ambient", "Shelf stable", storage === "ambient")}</div></fieldset>
+          <div class="location-review"><div class="section-heading small"><div><p class="kicker">Reviewed pickup point</p><h3>Place the private donor pin</h3></div><button class="button secondary" id="use-location" type="button">Use my location</button></div><div class="field"><label for="pickup-address">Pickup address <span class="optional-label">Optional</span></label><div class="address-row"><input id="pickup-address" name="pickup_address" autocomplete="street-address" value="${e(draft.pickup_address || "")}" placeholder="Store or street address" /><button class="button secondary" id="find-address" type="button">Find address</button></div><small>Find an Atlanta-area address, use GPS, or place the map pin. Any one option is enough.</small></div>${interactivePinMap()}<p id="location-summary" class="map-caption">${state.offerLocation ? locationReviewLabel() : "Find an address, use GPS, or click the map to place a reviewed pickup pin."}</p><p class="notice neutral">Exact coordinates are hidden from recipients until a valid claim. Media analysis never infers location.</p></div>
+          <fieldset class="field"><legend>Transport plan ${inferredTag(inferred, "transport_mode")}</legend><div class="transport-grid">${radio("transport_mode", "recipient_pickup", "Recipient pickup", transport === "recipient_pickup", "Recipient reconfirms cold-chain transport.")}${radio("transport_mode", "donor_delivery", "Donor delivery", transport === "donor_delivery", "Maximum 5 km in this release.")}${radio("transport_mode", "transportation_needed", "Transport needed", transport === "transportation_needed", "Blocks confirmation until resolved.")}</div></fieldset>
+          <div class="field radius-field" ${transport === "donor_delivery" ? "" : "hidden"}><label for="delivery-radius">Delivery radius (km, maximum 5)</label><input id="delivery-radius" name="donor_delivery_radius_km" type="number" min="0.1" max="5" step="0.1" value="5" /></div>
+          <div id="form-error" class="notice danger" role="alert" hidden></div><button class="button primary wide" type="submit">I reviewed this offer — notify recipients <span aria-hidden="true">→</span></button><p class="submit-note">Your confirmed deadline is authoritative. FoodKeeper context, if shown later, is advisory only.</p>
+        </form></section>
+        <aside class="review-aside">${landingMap(true)}<div class="panel decision-card"><p class="kicker">What happens next</p><ol><li>Retrieve 30 likely profiles by meaning.</li><li>Apply non-negotiable safety and logistics rules.</li><li>Notify up to three feasible recipients.</li></ol><strong>Vector search finds possibilities. Rules decide eligibility.</strong></div></aside>
+      </div>`;
+    const form = workspace.querySelector("#offer-form");
+    workspace.querySelector("#back-to-capture").addEventListener("click", () => { state.offerLocation = null; renderDonorForm(); });
+    workspace.querySelector("#use-location").addEventListener("click", () => useLocation(form));
+    workspace.querySelector("#find-address").addEventListener("click", () => findAddress(form));
+    workspace.querySelector("#pin-map").addEventListener("click", setMapPin);
+    positionMapPin();
+    form.addEventListener("change", (event) => { if (event.target.name === "transport_mode") form.querySelector(".radius-field").hidden = event.target.value !== "donor_delivery"; });
+    form.addEventListener("submit", submitOffer);
+  }
+
+  async function findAddress(form) {
+    const address = form.elements.pickup_address.value.trim();
+    const button = form.querySelector("#find-address");
+    if (!address) {
+      form.elements.pickup_address.focus();
+      return showToast("Enter a complete pickup address first.", true);
+    }
+    setBusy(button, true, "Finding…");
+    try {
+      const result = await api("/api/locations/geocode", { method: "POST", body: { address }, token: null });
+      if (!Number.isFinite(Number(result.latitude)) || !Number.isFinite(Number(result.longitude))) throw new Error("That address did not return a usable pickup pin.");
+      state.offerLocation = { latitude: Number(result.latitude), longitude: Number(result.longitude), source: "address" };
+      if (result.formatted_address) form.elements.pickup_address.value = result.formatted_address;
+      positionMapPin();
+      updateLocationSummary();
+      showToast("Address found. Review the pin before outreach.");
+    } catch (err) {
+      showToast(errorMessage(err), true);
+    } finally {
+      setBusy(button, false);
+    }
   }
 
   function useLocation(form) {
@@ -160,9 +412,9 @@
     button.disabled = true;
     button.textContent = "Locating…";
     navigator.geolocation.getCurrentPosition((position) => {
-      form.elements.donor_latitude.value = position.coords.latitude.toFixed(6);
-      form.elements.donor_longitude.value = position.coords.longitude.toFixed(6);
-      form.elements.location_source.value = "gps";
+      state.offerLocation = { latitude: position.coords.latitude, longitude: position.coords.longitude, source: "gps" };
+      positionMapPin();
+      updateLocationSummary();
       button.textContent = "Location added";
       button.disabled = false;
     }, () => {
@@ -180,19 +432,21 @@
     const error = form.querySelector("#form-error");
     const data = new FormData(form);
     const transport = String(data.get("transport_mode"));
+    const pickupAddress = String(data.get("pickup_address") || "").trim() || ({ gps: "GPS-selected pickup", corrected_pin: "Map-selected pickup", address: "Address-selected pickup" }[state.offerLocation?.source] || "Reviewed pickup location");
     const payload = {
       description: String(data.get("description")).trim(),
       quantity_original: String(data.get("quantity_original")).trim(),
       quantity_pallets: Number(data.get("quantity_pallets")),
       storage_state: String(data.get("storage_state")),
       pickup_deadline: new Date(String(data.get("pickup_deadline"))).toISOString(),
-      pickup_address: String(data.get("pickup_address")).trim(),
-      donor_latitude: Number(data.get("donor_latitude")),
-      donor_longitude: Number(data.get("donor_longitude")),
-      location_source: String(data.get("location_source")),
+      pickup_address: pickupAddress,
+      donor_latitude: state.offerLocation?.latitude,
+      donor_longitude: state.offerLocation?.longitude,
+      location_source: state.offerLocation?.source,
       transport_mode: transport,
     };
     if (transport === "donor_delivery") payload.donor_delivery_radius_km = Number(data.get("donor_delivery_radius_km"));
+    if (!state.offerLocation) { error.textContent = "Place the reviewed pickup pin or use your location before notifying recipients."; error.hidden = false; return; }
     setBusy(button, true, "Creating rescue…");
     error.hidden = true;
     try {
@@ -201,6 +455,7 @@
       sessionStorage.setItem(tokenKey("donor"), result.status_token);
       state.token = result.status_token;
       state.demoRecipients = Array.isArray(result.recipient_access) ? result.recipient_access : [];
+      sessionStorage.setItem("pantry-relay:demo-recipients", JSON.stringify(state.demoRecipients));
       state.data = { offer: result, events: [] };
       state.role = "status";
       history.replaceState(null, "", `${location.pathname}?role=status`);
@@ -222,6 +477,10 @@
   async function loadDonorStatus() {
     try {
       state.data = await api("/api/offers/status");
+      if (Array.isArray(state.data.demo_recipient_access)) {
+        state.demoRecipients = state.data.demo_recipient_access;
+        sessionStorage.setItem("pantry-relay:demo-recipients", JSON.stringify(state.demoRecipients));
+      }
       drawDonorStatus();
       const status = offerOf(state.data).status;
       if (!TERMINAL.has(status)) startPolling(loadDonorStatus);
@@ -250,6 +509,7 @@
           ${reservation ? `<div class="notice success"><strong>${offer.status === "reserved" ? "A recipient has a temporary hold." : "Handoff reservation"}</strong> ${reservation.expires_at ? `Confirmation deadline: ${e(dateTime(reservation.expires_at))}.` : ""}</div>` : ""}
           <div class="button-row"><button class="button quiet" id="refresh-status" type="button">Refresh now</button><button class="button secondary" id="new-offer" type="button">Start another offer</button></div>
         </section>
+        ${workflowMap(state.data.map, "Reviewed rescue map")}
         <section class="panel"><p class="kicker">Notification wave</p><h2>${candidates.filter((item) => item.notification_status === "sent").length || offer.notifications_count || 0} recipient updates</h2>
           <p class="muted">Simulated in-app outreach only. Live staffing and capacity remain uncertain until confirmation.</p>
           ${candidateList(candidates)}
@@ -305,15 +565,16 @@
   function drawRecipient() {
     const notices = arrayOf(state.data.notifications);
     const current = currentNotification();
+    const single = notices.length === 1;
     workspace.innerHTML = `
-      ${pageLead("Recipient inbox", `Welcome, ${e(state.data.recipient?.name || "rescue partner")}.`, "These notifications are simulated; availability and staffing must be reconfirmed.")}
-      <div class="inbox-layout">
-        <section class="panel inbox-list"><div class="section-heading"><div><p class="kicker">Simulated inbox</p><h2>${notices.length} offer${notices.length === 1 ? "" : "s"}</h2></div><button id="leave-recipient" class="button quiet" type="button">Leave inbox</button></div>
+      ${pageLead("Simulated recipient inbox", `Welcome, ${e(state.data.recipient?.name || "rescue partner")}.`, "Review one urgent offer. Live capacity, staffing, and transport still need your confirmation.")}
+      <div class="inbox-layout ${single ? "single-offer" : ""}">
+        ${single ? "" : `<section class="panel inbox-list"><div class="section-heading"><div><p class="kicker">Offers needing a response</p><h2>${notices.length} offers</h2></div><button id="leave-recipient" class="button quiet" type="button">Leave inbox</button></div>
           ${notices.length ? notices.map(notificationCard).join("") : emptyState("No active notifications", "A new wave will appear here when an eligible offer is available.")}
-        </section>
+        </section>`}
         <section class="panel offer-detail" id="offer-detail">${current ? recipientDetail(current) : emptyState("Choose an offer", "Select a notification to review its safety and logistics evidence.")}</section>
       </div>`;
-    workspace.querySelector("#leave-recipient").addEventListener("click", () => clearToken("recipient"));
+    workspace.querySelector("#leave-recipient")?.addEventListener("click", () => clearToken("recipient"));
     workspace.querySelectorAll(".notification-card").forEach((button) => button.addEventListener("click", () => {
       state.selectedOfferId = button.dataset.offerId;
       drawRecipient();
@@ -337,7 +598,9 @@
     const canRespond = response === "pending" && !["reserved", "confirmed", "completed"].includes(status);
     const canConfirm = response === "holding" || (status === "reserved" && reservation);
     const canComplete = response === "won" || status === "confirmed";
-    return `<div class="section-heading"><div><p class="kicker">Offer ${e(shortId(offerId))}</p><h2>${e(offer.description || item.title || "Food rescue offer")}</h2></div>${statusPill(status)}</div>
+    const donorLocation = offer.donor_location || offer.map?.donor;
+    return `<div class="section-heading"><div><p class="kicker">Offer ${e(shortId(offerId))}</p><h2>Can you rescue ${e(offer.quantity_original || pallets(offer.quantity_pallets))}?</h2></div>${statusPill(status)}</div>
+      <p class="offer-name">${e(offer.description || item.title || "Food rescue offer")}</p>
       <p>${e(item.message || "Your operation passed deterministic storage, quantity, route, and deadline checks.")}</p>
       <div class="fact-grid compact-facts">
         ${fact("Quantity", offer.quantity_original || pallets(offer.quantity_pallets))}
@@ -347,9 +610,10 @@
         ${fact("Transport", transportLabel(offer.transport_mode))}
         ${fact("Response", responseLabel(response))}
       </div>
-      <div class="map-card" aria-label="Pickup location summary"><span class="map-pin" aria-hidden="true"></span><div><strong>${e(locationLabel(offer.donor_location) || "Exact pickup point is hidden")}</strong><small>${offer.donor_location ? "Available because this recipient has a valid claim." : "Exact coordinates unlock only after a valid claim. Route values may use approximate ZIP-centroid data."}</small></div></div>
+      <div class="map-card" aria-label="Pickup location summary"><span class="map-pin" aria-hidden="true"></span><div><strong>${e(locationLabel(donorLocation) || "Exact pickup point is hidden")}</strong><small>${donorLocation ? "Available because this recipient has a valid claim." : "Exact coordinates unlock only after a valid claim. Route values may use approximate ZIP-centroid data."}</small></div></div>
+      ${workflowMap(offer.map, "Recipient route context")}
       <div class="notice warning"><strong>Live-capacity check:</strong> Confirm current space, staffing, and cold-chain transport before the handoff.</div>
-      ${canRespond ? `<div class="action-block"><h3>Can you take the full offer?</h3><div class="button-row"><button class="button primary" data-action="claim" type="button">Accept temporarily</button><button class="button secondary" data-action="decline" type="button">Decline</button></div></div>` : ""}
+      ${canRespond ? `<div class="action-block"><h3>Can your team safely receive the full offer?</h3><div class="button-row"><button class="button primary" data-action="claim" type="button">Hold for 10 minutes</button><button class="button secondary" data-action="decline" type="button">Decline</button></div></div>` : ""}
       ${canConfirm ? confirmForm(offerId, reservation) : ""}
       ${canComplete ? completeForm(offerId) : ""}
       ${!canRespond && !canConfirm && !canComplete ? `<div class="notice neutral">This action is ${e(responseLabel(response).toLowerCase())}. Refreshing cannot replay an invalidated action.</div>` : ""}`;
@@ -415,10 +679,22 @@
       const offers = coordinatorOffers(state.data);
       if (!state.selectedOfferId && offers[0]) state.selectedOfferId = offers[0].offer_id || offers[0].id;
       drawCoordinator();
+      if (!state.equityAudit) loadEquityAudit();
       if (offers.some((offer) => !TERMINAL.has(offer.status))) startPolling(loadCoordinator);
     } catch (err) {
       renderLoadError("Could not load coordinator operations", err, () => clearToken("ops"));
     }
+  }
+
+  async function loadEquityAudit() {
+    state.equityAudit = { loading: true };
+    if (state.role === "ops" && state.data) drawCoordinator();
+    try {
+      state.equityAudit = await api("/api/ops/equity-audit");
+    } catch (err) {
+      state.equityAudit = { error: errorMessage(err) };
+    }
+    if (state.role === "ops" && state.data) drawCoordinator();
   }
 
   function drawCoordinator() {
@@ -428,13 +704,62 @@
     workspace.innerHTML = `
       ${pageLead("Coordinator operations", "Keep every rescue safe, explainable, and moving.", "Demo authorization only — this is not production identity or recipient onboarding.")}
       <section class="metric-strip" aria-label="Completed impact"><div><strong>${e(impact.completed_offers ?? 0)}</strong><span>completed rescues</span></div><div><strong>${e(formatNumber(impact.completed_quantity_pallets ?? 0))}</strong><span>pallets moved</span></div><div><strong>${e(offers.filter((o) => !TERMINAL.has(o.status)).length)}</strong><span>active offers</span></div></section>
+      ${equityProof(state.equityAudit)}
       <div class="ops-layout">
         <section class="panel ops-queue"><div class="section-heading"><div><p class="kicker">Shared queue</p><h2>${offers.length} offer${offers.length === 1 ? "" : "s"}</h2></div><button id="leave-ops" class="button quiet" type="button">Lock view</button></div>${offers.length ? offers.map(opsCard).join("") : emptyState("Queue is clear", "New donor offers will appear here.")}</section>
         <section class="panel ops-detail">${current ? coordinatorDetail(current) : emptyState("Choose an offer", "Select a queue item to inspect its timeline and actions.")}</section>
       </div>`;
     workspace.querySelector("#leave-ops").addEventListener("click", () => clearToken("ops"));
+    workspace.querySelector("#refresh-equity")?.addEventListener("click", loadEquityAudit);
     workspace.querySelectorAll(".ops-card").forEach((button) => button.addEventListener("click", () => { state.selectedOfferId = button.dataset.offerId; drawCoordinator(); }));
     workspace.querySelectorAll("[data-ops-action]").forEach((button) => button.addEventListener("click", () => runOpsAction(button, current)));
+  }
+
+  function equityProof(audit) {
+    if (audit?.loading) {
+      return `<section class="panel equity-proof" aria-labelledby="equity-title"><div class="section-heading"><div><p class="kicker">Real matcher evidence</p><h2 id="equity-title">Equity &amp; ten-match proof</h2></div><span class="proof-status unavailable">Loading</span></div><p class="muted">Loading protected BigQuery proof. Coordinator operations remain available while this runs.</p></section>`;
+    }
+    if (!audit || audit.error) {
+      return `<section class="panel equity-proof" aria-labelledby="equity-title"><div class="section-heading"><div><p class="kicker">Real matcher evidence</p><h2 id="equity-title">Equity &amp; ten-match proof</h2></div><span class="proof-status unavailable">Unavailable</span></div><p class="muted">${e(audit?.error || "Loading protected BigQuery evidence…")}</p><button class="button secondary" id="refresh-equity" type="button">Retry evidence</button></section>`;
+    }
+    const proof = audit.ten_match_proof || {};
+    const execution = audit.execution || {};
+    const postings = arrayOf(audit.postings);
+    const passed = proof.ok === true && Number(audit.posting_count) === Number(audit.expected_postings || 10);
+    const sourceLabel = execution.source === "cache" ? "Cached real BigQuery proof" : "Live BigQuery proof";
+    const generated = dateTime(execution.generated_at);
+    const served = dateTime(execution.served_at);
+    const firstEvidence = postings[0]?.retrieval_evidence || {};
+    return `<section class="panel equity-proof" aria-labelledby="equity-title">
+      <div class="section-heading"><div><p class="kicker">Real matcher evidence</p><h2 id="equity-title">Equity &amp; ten-match proof</h2><p class="muted">Ten independent sample postings—not ten rescues or measured community outcomes.</p></div><span class="proof-status ${passed ? "passed" : "incomplete"}">${passed ? "10 / 10 passed" : "Incomplete proof"}</span></div>
+      <div class="proof-metrics" aria-label="Ten-match proof summary">
+        ${proofMetric(`${formatNumber(proof.match_execution_count ?? audit.posting_count)}/${formatNumber(proof.expected_matches ?? audit.expected_postings)}`, "matches recorded")}
+        ${proofMetric(`${formatNumber(proof.unique_vector_job_count ?? 0)}/${formatNumber(proof.vector_job_count ?? 0)}`, "distinct vector jobs")}
+        ${proofMetric(proof.all_jobs_brute_force_vector_search ? "Top 30" : "Unverified", "brute-force VECTOR_SEARCH")}
+        ${proofMetric(`${formatNumber(audit.tract_evidence_count ?? 0)}/${formatNumber(audit.matched_postings ?? 0)}`, "selected tracts evidenced")}
+      </div>
+      <div class="proof-provenance"><strong>${e(sourceLabel)}</strong><span>Generated ${e(generated)} · served ${e(served)}</span><span>${e(firstEvidence.query_label || "Query label unavailable")} · source job ${e(shortId(audit.source_job_id))}</span></div>
+      ${equityRows(postings)}
+      <div class="proof-footer"><div><p class="kicker">Generated assumptions</p><p>${e(audit.generated_assumptions?.donor_location?.label || "Sample postings use a documented Atlanta demo anchor.")} Quantity: ${e(audit.generated_assumptions?.quantity_label || "standardized for comparison")}.</p></div><div><p class="kicker">Limitations</p><ul>${arrayOf(audit.limitations).map((item) => `<li>${e(item)}</li>`).join("")}</ul></div></div>
+      <div class="proof-actions"><span>${proof.all_jobs_labeled ? "All jobs labeled" : "Job labeling incomplete"} · ${proof.all_results_recorded ? "all outcomes recorded" : "outcomes incomplete"}</span><button class="button quiet" id="refresh-equity" type="button">Refresh evidence</button></div>
+    </section>`;
+  }
+
+  function proofMetric(value, label) {
+    return `<div><strong>${e(value)}</strong><span>${e(label)}</span></div>`;
+  }
+
+  function equityRows(postings) {
+    if (!postings.length) return `<p class="notice warning">No posting-level proof is available.</p>`;
+    return `<div class="equity-table-wrap"><table class="equity-table"><thead><tr><th scope="col">Posting</th><th scope="col">Selected / rejected</th><th scope="col">Approximate tract evidence</th><th scope="col">Vector job</th></tr></thead><tbody>${postings.map((posting, index) => {
+      const evidence = posting.retrieval_evidence || {};
+      const total = Number(evidence.result_count ?? evidence.top_k);
+      const eligible = Number(posting.eligible_count ?? 0);
+      const rejected = Number.isFinite(total) ? Math.max(0, total - eligible) : null;
+      const tract = posting.tract_geo_id ? `Tract ${posting.tract_geo_id}` : "Explicit fallback/no tract";
+      const rates = [posting.poverty_rate == null ? "" : `${percent(posting.poverty_rate)} poverty`, posting.no_vehicle_rate == null ? "" : `${percent(posting.no_vehicle_rate)} no vehicle`].filter(Boolean).join(" · ");
+      return `<tr><th scope="row">${e(posting.posting_id || index + 1)}</th><td><strong>${e(posting.selected_recipient_id || "No match")}</strong><small>${e(eligible)} eligible${rejected == null ? "" : ` · ${e(rejected)} deterministically rejected`}</small></td><td><strong>${e(tract)}</strong><small>${e(rates || posting.need_evidence_source || "Need evidence unavailable")}</small></td><td><strong>${e(shortId(evidence.job_id))}</strong><small>${e(evidence.use_brute_force && evidence.top_k === 30 ? "brute-force · top 30" : "proof incomplete")}</small></td></tr>`;
+    }).join("")}</tbody></table></div>`;
   }
 
   function opsCard(offer) {
@@ -445,11 +770,12 @@
   function coordinatorDetail(offer) {
     const id = offer.offer_id || offer.id;
     const events = arrayOf(offer.events);
-    const candidates = arrayOf(offer.candidates);
+    const candidates = [...arrayOf(offer.candidates), ...arrayOf(offer.rejections).map((item) => ({ ...item, eligible: false, response: "rejected" }))];
     const closed = TERMINAL.has(offer.status);
     return `<div class="section-heading"><div><p class="kicker">Offer ${e(shortId(id))}</p><h2>${e(offer.description_original || offer.description || "Food rescue offer")}</h2></div>${statusPill(offer.status)}</div>
       <div class="fact-grid compact-facts">${fact("Quantity", offer.quantity_original || pallets(offer.quantity_pallets))}${fact("Deadline", dateTime(offer.deadline || offer.pickup_deadline))}${fact("Transport", transportLabel(offer.transport_mode))}${fact("Wave", offer.current_wave ?? "—")}${fact("Reserved for", offer.selected_recipient_name || offer.selected_recipient_id || "No one yet")}${fact("Location", offer.pickup_address || "Private donor pin")}</div>
       <div class="map-card"><span class="map-pin" aria-hidden="true"></span><div><strong>${e(offer.pickup_address || "Donor pickup point")}</strong><small>Coordinator access may show an exact corrected pin. Candidate locations and need context may use approximate ZIP centroids.</small></div></div>
+      ${workflowMap(offer.map, "Coordinator logistics map")}
       <section class="subsection"><div class="section-heading small"><div><p class="kicker">Deterministic candidate audit</p><h3>Why recipients did or did not qualify</h3></div></div>${candidateList(candidates, true)}</section>
       <section class="subsection"><p class="kicker">Recovery and outcome</p><div class="button-row wrap"><button class="button secondary" data-ops-action="expire" type="button" ${closed ? "disabled" : ""}>Simulate timeout</button><button class="button secondary" data-ops-action="promote" type="button" ${closed ? "disabled" : ""}>Promote wave</button><button class="button danger" data-ops-action="cancel" type="button" ${closed ? "disabled" : ""}>Cancel</button><button class="button danger" data-ops-action="fail" type="button" ${closed ? "disabled" : ""}>Mark failed</button></div><p class="muted">${closed ? "This offer is terminal; state-changing controls are disabled." : "Timeout is a demo/recovery accelerator; authenticated Cloud Tasks remain the normal expiry path."}</p></section>
       ${events.length ? `<section class="subsection">${timelineContent(events)}</section>` : ""}`;
@@ -482,6 +808,11 @@
 
   function clearToken(role, nextRole = role) {
     sessionStorage.removeItem(tokenKey(role));
+    if (role === "donor") {
+      sessionStorage.removeItem("pantry-relay:demo-recipients");
+      state.demoRecipients = [];
+      state.offerLocation = null;
+    }
     state.token = "";
     setRole(nextRole);
   }
@@ -598,7 +929,12 @@
     const token = options.token === null ? "" : (options.token || state.token);
     if (token) headers.Authorization = `Bearer ${token}`;
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
-    if (options.mutation) headers["X-Idempotency-Key"] = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    const commandId = options.mutation ? commandIdentity(options.method || "POST", path, options.body) : "";
+    if (options.mutation) {
+      if (options.intentionalNewAction) state.commandKeys.delete(commandId);
+      if (!state.commandKeys.has(commandId)) state.commandKeys.set(commandId, crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+      headers["X-Idempotency-Key"] = state.commandKeys.get(commandId);
+    }
     const response = await fetch(path, { method: options.method || "GET", headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
     let result = {};
     try { result = await response.json(); } catch (_err) { /* handled below */ }
@@ -610,7 +946,18 @@
       error.detail = detail;
       throw error;
     }
+    if (commandId) state.commandKeys.delete(commandId);
     return result;
+  }
+
+  function commandIdentity(method, path, body) {
+    return `${method}:${path}:${stableJson(body)}`;
+  }
+
+  function stableJson(value) {
+    if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+    if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+    return JSON.stringify(value ?? null);
   }
 
   function setBusy(button, busy, text) {
@@ -637,7 +984,7 @@
   function offerOf(data) { return data?.offer || data || {}; }
   function coordinatorOffers(data) {
     return arrayOf(data?.offers).map((entry) => entry?.offer
-      ? { ...entry.offer, events: arrayOf(entry.events), candidates: arrayOf(entry.candidates), reservation: entry.reservation }
+      ? { ...entry.offer, events: arrayOf(entry.events), candidates: arrayOf(entry.candidates), reservation: entry.reservation, map: entry.map }
       : entry);
   }
   function arrayOf(value) { return Array.isArray(value) ? value : []; }
@@ -645,6 +992,7 @@
   function title(value) { return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
   function pallets(value) { return value == null ? "—" : `${formatNumber(value)} pallet${Number(value) === 1 ? "" : "s"}`; }
   function formatNumber(value) { const number = Number(value); return Number.isFinite(number) ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(number) : String(value || "0"); }
+  function percent(value) { const number = Number(value); return Number.isFinite(number) ? new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 }).format(number) : "—"; }
   function transportLabel(value) { return ({ recipient_pickup: "Recipient pickup", donor_delivery: "Donor delivery (≤ 5 km)", transportation_needed: "Transportation needed" })[value] || title(value) || "—"; }
   function locationLabel(value) {
     if (!value) return "";
@@ -662,5 +1010,9 @@
   function responseLabel(value) { return ({ pending: "Awaiting response", declined: "Declined", holding: "Holding", hold_expired: "Hold expired", timed_out: "Timed out", won: "Confirmed winner", invalidated: "Action invalidated", eligible: "Eligible", rejected: "Rejected", sent: "Notified" })[value] || title(value) || "Pending"; }
   function dateTime(value) { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date); }
   function errorMessage(err) { return err instanceof Error ? err.message : "The service is unavailable. Your input has not been lost."; }
+  function readSessionJson(key, fallback) {
+    try { return JSON.parse(sessionStorage.getItem(key)) || fallback; }
+    catch (_err) { return fallback; }
+  }
   function e(value) { return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;"); }
 })();

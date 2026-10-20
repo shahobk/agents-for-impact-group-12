@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
+import threading
 import time
 from typing import Any, AsyncIterable, Iterable, Mapping
 from uuid import uuid4
@@ -13,6 +15,14 @@ from .config import settings
 
 class AgentRuntimeUnavailable(RuntimeError):
     """Raised when the deployed ADK runtime cannot be constructed."""
+
+
+class AgentMatchUnavailable(AgentRuntimeUnavailable):
+    """Raised when an ADK run does not return a successful matcher tool result."""
+
+
+_shared_runner: Any | None = None
+_shared_runner_lock = threading.Lock()
 
 
 def _safe_match_metadata(response: Any) -> dict[str, Any]:
@@ -129,16 +139,31 @@ def summarize_adk_events(events: Iterable[Any]) -> dict[str, Any]:
     }
 
 
-async def run_root_agent(
+def _extract_match_result(events: Iterable[Any]) -> dict[str, Any] | None:
+    """Extract the transient tool result; callers must not persist it wholesale."""
+    match_result: dict[str, Any] | None = None
+    for event in events:
+        get_responses = getattr(event, "get_function_responses", None)
+        for response in get_responses() if callable(get_responses) else []:
+            if str(getattr(response, "name", "") or "") != "match_surplus_offer":
+                continue
+            payload = getattr(response, "response", None)
+            if not isinstance(payload, Mapping) or payload.get("error"):
+                continue
+            result = payload.get("result", payload)
+            if isinstance(result, Mapping):
+                match_result = dict(result)
+    return match_result
+
+
+async def _execute_root_agent(
     prompt: str,
     *,
-    user_id: str = "pantry-relay-demo",
-    session_id: str | None = None,
-    runner: Any | None = None,
-    agent_instance: Any | None = None,
-) -> dict[str, Any]:
-    """Execute the root agent through an ADK Runner and return safe evidence."""
-
+    user_id: str,
+    session_id: str | None,
+    runner: Any | None,
+    agent_instance: Any | None,
+) -> tuple[list[Any], dict[str, Any]]:
     if not prompt.strip():
         raise ValueError("prompt is required")
     selected_agent = agent_instance or root_agent
@@ -151,11 +176,22 @@ async def run_root_agent(
     except ImportError as exc:  # pragma: no cover - deployment dependency
         raise AgentRuntimeUnavailable("google-adk is not installed.") from exc
 
-    owns_runner = runner is None
-    active_runner = runner or InMemoryRunner(
-        agent=selected_agent,
-        app_name=settings.app_name,
-    )
+    global _shared_runner
+    owns_runner = runner is None and agent_instance is not None
+    uses_shared_runner = runner is None and agent_instance is None
+    if uses_shared_runner:
+        with _shared_runner_lock:
+            if _shared_runner is None:
+                _shared_runner = InMemoryRunner(
+                    agent=selected_agent,
+                    app_name=settings.app_name,
+                )
+        active_runner = _shared_runner
+    else:
+        active_runner = runner or InMemoryRunner(
+            agent=selected_agent,
+            app_name=settings.app_name,
+        )
     active_session_id = session_id or f"agent-proof-{uuid4().hex}"
     started = time.monotonic()
     events: list[Any] = []
@@ -177,21 +213,127 @@ async def run_root_agent(
     finally:
         if owns_runner:
             await active_runner.close()
+        elif uses_shared_runner:
+            # Keep the runner/toolsets alive across offers, but discard prompt
+            # and event history once safe evidence has been extracted.
+            try:
+                await active_runner.session_service.delete_session(
+                    app_name=settings.app_name,
+                    user_id=user_id,
+                    session_id=active_session_id,
+                )
+            except Exception:
+                # Session cleanup must not replace a completed matcher result.
+                pass
+    return events, {
+        "runner": "google.adk.runners.InMemoryRunner",
+        "session_id": active_session_id,
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def run_root_agent(
+    prompt: str,
+    *,
+    user_id: str = "pantry-relay-demo",
+    session_id: str | None = None,
+    runner: Any | None = None,
+    agent_instance: Any | None = None,
+) -> dict[str, Any]:
+    """Execute the root agent through an ADK Runner and return safe evidence."""
+
+    events, execution = await _execute_root_agent(
+        prompt,
+        user_id=user_id,
+        session_id=session_id,
+        runner=runner,
+        agent_instance=agent_instance,
+    )
 
     result = summarize_adk_events(events)
-    result.update(
-        {
-            "runner": "google.adk.runners.InMemoryRunner",
-            "session_id": active_session_id,
-            "elapsed_ms": round((time.monotonic() - started) * 1000),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }
+    result.update(execution)
+    return result
+
+
+async def match_offer_via_root_agent(
+    description: str,
+    quantity_pallets: float,
+    storage_state: str,
+    pickup_deadline: str,
+    donor_latitude: float,
+    donor_longitude: float,
+    split_allowed: bool = False,
+    transport_mode: str | None = None,
+    donor_delivery_radius_km: float | None = None,
+    *,
+    user_id: str = "pantry-relay-workflow",
+    session_id: str | None = None,
+    runner: Any | None = None,
+    agent_instance: Any | None = None,
+) -> dict[str, Any]:
+    """Run root_agent and return its matcher result plus an allowlisted trace.
+
+    The generated prompt and raw ADK/model events remain transient. Workflow
+    persistence consumes the structured match and ``_agent_trace`` separately.
+    """
+    payload = {
+        "description": description,
+        "quantity_pallets": quantity_pallets,
+        "storage_state": storage_state,
+        "pickup_deadline": pickup_deadline,
+        "donor_latitude": donor_latitude,
+        "donor_longitude": donor_longitude,
+        "split_allowed": split_allowed,
+        "transport_mode": transport_mode,
+        "donor_delivery_radius_km": donor_delivery_radius_km,
+    }
+    prompt = (
+        "Call match_surplus_offer exactly once with this reviewed offer JSON. "
+        "Use the deterministic tool result as authoritative and do not change "
+        f"eligibility: {json.dumps(payload, separators=(',', ':'), sort_keys=True)}"
     )
+    events, execution = await _execute_root_agent(
+        prompt,
+        user_id=user_id,
+        session_id=session_id or f"workflow-match-{uuid4().hex}",
+        runner=runner,
+        agent_instance=agent_instance,
+    )
+    summary = summarize_adk_events(events)
+    result = _extract_match_result(events)
+    if result is None or not summary.get("match_tool_succeeded"):
+        raise AgentMatchUnavailable(
+            "The ADK root agent did not return a successful match_surplus_offer result."
+        )
+    match_trace = next(
+        (
+            trace
+            for trace in summary.get("tool_trace", [])
+            if trace.get("tool") == "match_surplus_offer"
+            and trace.get("status") == "succeeded"
+        ),
+        {},
+    )
+    safe_metadata = match_trace.get("safe_result_metadata") or {}
+    result["_agent_trace"] = {
+        "runner": execution["runner"],
+        "session_id": execution["session_id"],
+        "root_agent_observed": bool(summary.get("root_agent_observed")),
+        "tool_name": "match_surplus_offer",
+        "status": "succeeded",
+        "latency_ms": match_trace.get("latency_ms"),
+        "elapsed_ms": execution["elapsed_ms"],
+        "completed_at": execution["completed_at"],
+        "retrieval_evidence": dict(safe_metadata.get("retrieval_evidence") or {}),
+    }
     return result
 
 
 __all__ = [
+    "AgentMatchUnavailable",
     "AgentRuntimeUnavailable",
+    "match_offer_via_root_agent",
     "run_root_agent",
     "summarize_adk_events",
 ]

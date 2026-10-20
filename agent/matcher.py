@@ -282,6 +282,14 @@ def _recommendation(evaluation: CandidateEvaluation, request: MatchRequest) -> d
             "service_days": candidate.service_days,
             "profile_text": candidate.profile_text,
             "populations_served": candidate.populations_served,
+            # Recipient coordinates come from approximate ZIP centroids in the
+            # published corpus. Donor coordinates are inputs to eligibility and
+            # are intentionally never copied into recommendation output.
+            "latitude": candidate.latitude,
+            "longitude": candidate.longitude,
+            "location_source": "approximate_zip_centroid",
+            "location_approximate": True,
+            "route_source": "haversine_estimate",
             "transport": {
                 "mode": request.transport_mode,
                 "donor_delivery_radius_km": request.donor_delivery_radius_km,
@@ -361,7 +369,11 @@ def match_surplus(
     eligible = sorted((item for item in evaluations if item.eligible), key=_ranking_key)
     rejected = [item for item in evaluations if not item.eligible]
 
-    recommendations = [_recommendation(item, parsed) for item in eligible[:3]]
+    # Keep enough deterministically eligible rows for later notification waves.
+    # The compatibility selected/fallbacks contract remains capped at three.
+    recommendations = [_recommendation(item, parsed) for item in eligible[:9]]
+    for rank, recommendation in enumerate(recommendations, 1):
+        recommendation["rank"] = rank
     if len(eligible) >= 2 and _operationally_tied(eligible[0], eligible[1]):
         recommendations[0]["selection_reason"] += (
             f" Operationally tied with {eligible[1].name}; selected using the explicit "
@@ -398,6 +410,7 @@ def match_surplus(
         "best": best,
         "selected": best,
         "fallbacks": recommendations[1:3],
+        "eligible_candidates": recommendations,
         "rejections": [item.to_dict() for item in rejected],
         "no_match": no_match,
         "outreach": outreach,

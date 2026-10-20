@@ -27,6 +27,8 @@ gcloud services enable \
   storage.googleapis.com \
   bigquery.googleapis.com \
   aiplatform.googleapis.com \
+  geocoding-backend.googleapis.com \
+  routes.googleapis.com \
   --project "${PROJECT_ID}"
 
 if ! gcloud iam service-accounts describe "${RUNTIME_SA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
@@ -36,7 +38,7 @@ if ! gcloud iam service-accounts describe "${TASK_CALLER_SA}" --project "${PROJE
   gcloud iam service-accounts create "${TASK_CALLER_SA_NAME}" --project "${PROJECT_ID}" --display-name "Pantry Relay Cloud Tasks OIDC caller"
 fi
 
-for role in roles/datastore.user roles/cloudtasks.enqueuer roles/bigquery.jobUser roles/aiplatform.user roles/mcp.toolUser roles/logging.logWriter; do
+for role in roles/datastore.user roles/cloudtasks.enqueuer roles/bigquery.jobUser roles/aiplatform.user roles/mcp.toolUser roles/logging.logWriter roles/serviceusage.serviceUsageConsumer; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member "serviceAccount:${RUNTIME_SA}" --role "${role}" --condition=None >/dev/null
 done
 gcloud iam service-accounts add-iam-policy-binding "${TASK_CALLER_SA}" --project "${PROJECT_ID}" --member "serviceAccount:${RUNTIME_SA}" --role roles/iam.serviceAccountUser >/dev/null
@@ -69,8 +71,12 @@ if ! gcloud storage buckets describe "gs://${PHOTO_BUCKET}" --project "${PROJECT
   gcloud storage buckets create "gs://${PHOTO_BUCKET}" --project "${PROJECT_ID}" --location "${REGION}" --uniform-bucket-level-access
 fi
 gcloud storage buckets update "gs://${PHOTO_BUCKET}" --lifecycle-file scripts/cloud_storage_lifecycle.json --project "${PROJECT_ID}"
-gcloud storage buckets add-iam-policy-binding "gs://${PHOTO_BUCKET}" \
-  --member "serviceAccount:${RUNTIME_SA}" --role roles/storage.objectAdmin >/dev/null
+# Intake photos are processed in memory and never written to this bucket. The
+# bucket exists only for optional future features and intentionally grants the
+# runtime no object permissions.
+gcloud storage buckets remove-iam-policy-binding "gs://${PHOTO_BUCKET}" \
+  --member "serviceAccount:${RUNTIME_SA}" --role roles/storage.objectAdmin \
+  --project "${PROJECT_ID}" >/dev/null 2>&1 || true
 
 if ! gcloud secrets describe "${COORDINATOR_SECRET}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
   openssl rand -base64 32 | gcloud secrets create "${COORDINATOR_SECRET}" --project "${PROJECT_ID}" --replication-policy automatic --data-file=-

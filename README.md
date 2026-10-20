@@ -14,15 +14,15 @@ notifications; the first qualified acceptance receives an atomic, ten-minute
 hold; and donor, recipient, and coordinator views read the same authoritative
 workflow state.
 
-The current public deployment checkpoint is Cloud Run revision `00009-pc7`:
+The public deployment is:
 
 <https://atlanta-grocery-rescue-61272668502.us-central1.run.app>
 
-The URL is public for the no-account donor demo. Firestore readiness and real
-OIDC-authenticated Cloud Tasks delivery, reservation expiry, and silent-wave
-promotion are verified. The final revision's deployed `AI.EMBED` path still
-awaits the explicitly documented Vertex AI runtime grant, so the complete
-public spinach path is not yet claimed.
+The URL is public for the no-account donor demo. The deployed flow uses the ADK
+root agent, its custom matcher tool, brute-force BigQuery `VECTOR_SEARCH`,
+Firestore transactions, and versioned OIDC-authenticated Cloud Tasks. Address,
+GPS, and map-pin pickup input replace raw coordinate fields. Speech and photo
+intake produce editable suggestions and always require review before submission.
 
 ### Run locally
 
@@ -40,7 +40,7 @@ evidence of durable cloud behavior.
 
 Role instructions:
 
-1. **Donor:** choose **Load spinach scenario**, review quantity, storage,
+1. **Donor:** choose **Run the spinach rescue**, review quantity, storage,
    location, transport, and deadline, then submit. Keep the private status view
    open.
 2. **Recipient:** use one of the current-wave demo-session buttons returned
@@ -63,11 +63,13 @@ Run verification with:
 node --check frontend/app.js
 ```
 
-At the newest local checkpoint, all 37 Python tests passed and the
-installed Playwright CLI completed spinach submission, hold, refresh-safe
-confirmation, completion, donor polling, coordinator impact, and simulated
-silent-wave promotion with zero browser console errors. See
-[`docs/VALIDATION.md`](docs/VALIDATION.md) for the exact evidence boundary.
+At the current checkpoint, all 72 Python tests pass. The installed Playwright
+CLI completed the deployed spinach submission, a simultaneous two-recipient
+claim race with one winner, refresh-safe confirmation, completion, donor
+polling, coordinator impact, mobile layout, keyboard map selection, and the
+live ten-posting equity audit. The real matching proof includes ten distinct
+labeled BigQuery jobs; each used brute-force top-30 `VECTOR_SEARCH` and returned
+nearest-tract need evidence.
 
 ### Provision and deploy the cloud target
 
@@ -84,9 +86,25 @@ The scripts target a single public Cloud Run service with a dedicated runtime
 identity, Firestore workflow repository, Cloud Tasks timeout queue and OIDC
 caller, Secret Manager values, and a lifecycle-managed Cloud Storage bucket.
 Real BigQuery vector retrieval and the protected managed BigQuery MCP path are
-separate from deterministic eligibility and workflow transitions. Confirm the
-deployed gates in [`docs/VALIDATION.md`](docs/VALIDATION.md) before presenting
-them as working.
+separate from deterministic eligibility and workflow transitions. Safe proof
+identifiers are recorded below so the repository remains self-contained while
+the local `docs/` working directory stays intentionally gitignored.
+
+### Verification snapshot
+
+- ADK Runner session: `agent-proof-72aa40037b3d4ac887e4c35aaadc8d1c`
+- ADK-correlated BigQuery job: `5072440b-fae0-4a6d-a8f7-22bcc37f5b8c`
+- Protected managed BigQuery MCP tool: `list_dataset_ids`; result digest
+  `e1b4442859b44bd80dee56767ba0a060412cd31596be4a7520b4833240febd8d`
+- Deployed offer proof: `root_agent_observed=true`, tool
+  `match_surplus_offer`, brute-force vector job
+  `8c4be85d-4cab-4913-be2a-bccd9f3dd568`
+- Ten-posting audit: 10/10 distinct labeled vector jobs, 10/10 result sets, and
+  10/10 approximate nearest-tract evidence records
+- Browser race: one claim returned `200`; the competing qualified claim
+  returned `409`; confirmation and completion returned `200`
+- Latest local suite: `72 passed`; the only warning is an upstream
+  `google-genai` Python 3.14 deprecation warning
 
 ### What is real, simulated, and approximate
 
@@ -94,7 +112,7 @@ them as working.
 |---|---|
 | Eligibility and workflow transitions | Deterministic application code; the LLM does not decide eligibility or claims |
 | Local offer/hold/confirm/complete path | Verified against the integrated FastAPI service with in-memory adapters |
-| Public Cloud Run revision | Real deployment with Firestore readiness and authenticated task expiry proven; final real-matcher browser completion remains pending |
+| Public Cloud Run service | Real deployment; Firestore persistence, ADK/BigQuery matching, atomic race behavior, completion, readiness, and OIDC task delivery are verified |
 | Recipient notifications | Simulated in-app inbox, not email/SMS/push |
 | Recipient identity | Pre-approved demo recipients; no public onboarding or production identity proofing |
 | Organization identity and reported IRS attributes | Source data; see the challenge reference below |
@@ -102,12 +120,9 @@ them as working.
 | Recipient location and neighborhood need | Approximate ZIP-centroid/nearest-tract evidence where available |
 | Donor deadline | Donor-confirmed and authoritative |
 | FoodKeeper context | Advisory only; never an automatic food-safety decision |
-| Route distance | Estimated/haversine fallback unless an explicitly evidenced Maps result is shown |
-
-Architecture, demo steps, and limitations are maintained in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-[`docs/DEMO.md`](docs/DEMO.md), and
-[`docs/VALIDATION.md`](docs/VALIDATION.md).
+| Route distance | Google Routes for the first three candidates when available; clearly labeled haversine fallback otherwise |
+| Photo intake | Real Gemini extraction when enabled; bytes are processed transiently and are not retained |
+| Speech intake | Browser speech recognition when supported; transcript remains editable and microphone audio is not retained |
 
 ---
 

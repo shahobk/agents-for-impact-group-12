@@ -36,6 +36,12 @@ class Settings:
     demo_mode: bool = True
     workflow_matcher_enabled: bool = True
     workflow_demo_fallback: bool = True
+    enable_photo_intake: bool = False
+    photo_intake_model: str = "gemini-2.5-flash"
+    max_photo_bytes: int = 5 * 1024 * 1024
+    enable_google_geocoding: bool = False
+    enable_google_routes: bool = False
+    maps_timeout_seconds: float = 3.0
     hold_minutes: int = 10
     response_window_minutes: int = 10
     cors_allow_origins: tuple[str, ...] = (
@@ -94,6 +100,24 @@ class Settings:
             ),
             workflow_demo_fallback=_as_bool(
                 os.getenv("WORKFLOW_DEMO_FALLBACK"), default=True
+            ),
+            enable_photo_intake=_as_bool(
+                os.getenv("ENABLE_PHOTO_INTAKE"), default=False
+            ),
+            photo_intake_model=os.getenv(
+                "PHOTO_INTAKE_MODEL", defaults.photo_intake_model
+            ),
+            max_photo_bytes=int(
+                os.getenv("MAX_PHOTO_BYTES", defaults.max_photo_bytes)
+            ),
+            enable_google_geocoding=_as_bool(
+                os.getenv("ENABLE_GOOGLE_GEOCODING"), default=False
+            ),
+            enable_google_routes=_as_bool(
+                os.getenv("ENABLE_GOOGLE_ROUTES"), default=False
+            ),
+            maps_timeout_seconds=float(
+                os.getenv("MAPS_TIMEOUT_SECONDS", defaults.maps_timeout_seconds)
             ),
             hold_minutes=int(os.getenv("HOLD_MINUTES", defaults.hold_minutes)),
             response_window_minutes=int(

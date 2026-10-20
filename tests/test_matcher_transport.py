@@ -58,6 +58,13 @@ def test_donor_delivery_is_limited_to_five_kilometres() -> None:
     assert result["best"]["recipient_id"] == "recipient-1"
     assert result["best"]["transport"]["maximum_donor_delivery_radius_km"] == 5
     assert result["best"]["transport"]["distance_source"].startswith("haversine")
+    assert result["best"]["latitude"] == 33.75
+    assert result["best"]["longitude"] == -84.39
+    assert result["best"]["location_source"] == "approximate_zip_centroid"
+    assert result["best"]["location_approximate"] is True
+    assert result["best"]["route_source"] == "haversine_estimate"
+    assert "donor_latitude" not in result["best"]
+    assert "donor_longitude" not in result["best"]
 
     too_far = match_surplus(
         _request(transport_mode="donor_delivery", donor_delivery_radius_km=5),
@@ -143,4 +150,26 @@ def test_bigquery_provider_returns_correlated_vector_job_evidence() -> None:
     assert "VECTOR_SEARCH(" in client.sql
     assert 'options => \'{"use_brute_force":true}\'' in client.sql
     assert client.config.labels["workload"] == "pantry_relay_vector_search"
+
+
+def test_matcher_retains_ranked_eligible_candidates_for_later_waves() -> None:
+    candidates = []
+    for index in range(6):
+        candidate = _candidate(longitude=-84.39 - index * 0.002)
+        candidate["recipient_id"] = f"recipient-{index}"
+        candidate["name"] = f"Pantry {index}"
+        candidate["semantic_distance"] = 0.1 + index * 0.01
+        candidate["refrigerated_transport"] = True
+        candidate["transport_available"] = True
+        candidates.append(candidate)
+
+    result = match_surplus(
+        _request(transport_mode="recipient_pickup"),
+        lambda _posting_text, *, top_k: candidates,
+    )
+
+    assert result["selected"] == result["eligible_candidates"][0]
+    assert result["fallbacks"] == result["eligible_candidates"][1:3]
+    assert len(result["eligible_candidates"]) == 6
+    assert [item["rank"] for item in result["eligible_candidates"]] == [1, 2, 3, 4, 5, 6]
 

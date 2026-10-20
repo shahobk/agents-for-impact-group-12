@@ -11,6 +11,71 @@ from typing import Any, Iterable, Mapping
 from .matcher import build_bigquery_candidate_provider, match_surplus
 
 
+_SAFE_RETRIEVAL_KEYS = (
+    "provider",
+    "job_id",
+    "location",
+    "query_label",
+    "job_labels",
+    "sql_fingerprint_sha256",
+    "vector_search",
+    "use_brute_force",
+    "top_k",
+    "result_count",
+    "total_bytes_processed",
+)
+
+
+def validate_ten_match_proof(
+    posting_results: Iterable[Mapping[str, Any]],
+    *,
+    expected_matches: int = 10,
+) -> dict[str, Any]:
+    """Validate that ten independent, safely evidenced vector jobs completed."""
+
+    records = [dict(item) for item in posting_results]
+    evidence = [
+        dict(item.get("retrieval_evidence") or {})
+        for item in records
+    ]
+    job_ids = [str(item["job_id"]) for item in evidence if item.get("job_id")]
+    results_recorded = all(
+        bool(item.get("selected_recipient_id")) or item.get("no_match") is True
+        for item in records
+    )
+    all_labeled = all(
+        item.get("query_label") == "pantry_relay_vector_search"
+        and (item.get("job_labels") or {}).get("workload")
+        == "pantry_relay_vector_search"
+        for item in evidence
+    )
+    all_vector = all(
+        item.get("vector_search") is True
+        and item.get("use_brute_force") is True
+        and item.get("top_k") == 30
+        for item in evidence
+    )
+    ok = bool(
+        len(records) == expected_matches
+        and len(job_ids) == expected_matches
+        and len(set(job_ids)) == expected_matches
+        and results_recorded
+        and all_labeled
+        and all_vector
+    )
+    return {
+        "ok": ok,
+        "expected_matches": expected_matches,
+        "match_execution_count": len(records),
+        "vector_job_count": len(job_ids),
+        "unique_vector_job_count": len(set(job_ids)),
+        "all_results_recorded": results_recorded,
+        "all_jobs_labeled": all_labeled,
+        "all_jobs_brute_force_vector_search": all_vector,
+        "job_ids": job_ids,
+    }
+
+
 def summarize_equity_audit(
     posting_results: Iterable[Mapping[str, Any]],
     *,
@@ -122,7 +187,12 @@ def run_bigquery_equity_audit(
         )
         selected = result.get("selected") or {}
         need = selected.get("need_evidence") or {}
-        job_id = (result.get("retrieval_evidence") or {}).get("job_id")
+        safe_retrieval_evidence = {
+            key: (result.get("retrieval_evidence") or {}).get(key)
+            for key in _SAFE_RETRIEVAL_KEYS
+            if (result.get("retrieval_evidence") or {}).get(key) is not None
+        }
+        job_id = safe_retrieval_evidence.get("job_id")
         if job_id:
             vector_job_ids.append(str(job_id))
         records.append(
@@ -136,13 +206,16 @@ def run_bigquery_equity_audit(
                 "no_vehicle_rate": need.get("no_vehicle_rate"),
                 "need_score": need.get("score"),
                 "need_evidence_source": need.get("source"),
+                "retrieval_evidence": safe_retrieval_evidence,
             }
         )
     audit = summarize_equity_audit(records, expected_postings=10)
+    ten_match_proof = validate_ten_match_proof(records, expected_matches=10)
     audit.update(
         {
             "source_job_id": getattr(source_job, "job_id", None),
             "vector_job_ids": vector_job_ids,
+            "ten_match_proof": ten_match_proof,
             "generated_assumptions": {
                 "donor_location": {
                     "latitude": donor_latitude,
@@ -157,4 +230,8 @@ def run_bigquery_equity_audit(
     return audit
 
 
-__all__ = ["run_bigquery_equity_audit", "summarize_equity_audit"]
+__all__ = [
+    "run_bigquery_equity_audit",
+    "summarize_equity_audit",
+    "validate_ten_match_proof",
+]

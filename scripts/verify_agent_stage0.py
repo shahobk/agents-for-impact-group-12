@@ -20,15 +20,6 @@ import sys
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
-from pathlib import Path
-import sys
-
-
-# Make the script runnable directly from the repository root without requiring
-# callers to remember an extra PYTHONPATH setting.
-repository_root = Path(__file__).resolve().parents[1]
-if str(repository_root) not in sys.path:
-    sys.path.insert(0, str(repository_root))
 
 
 def _args() -> argparse.Namespace:
@@ -44,6 +35,11 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--location", default=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"))
     parser.add_argument("--skip-agent", action="store_true")
     parser.add_argument("--skip-mcp", action="store_true")
+    parser.add_argument(
+        "--skip-ten-match",
+        action="store_true",
+        help="Skip the ten real vector-match executions/equity samples.",
+    )
     return parser.parse_args()
 
 
@@ -59,6 +55,7 @@ async def main() -> int:
     # Import only after setting configuration because Settings is immutable and
     # intentionally read once at process startup.
     from agent.matcher import match_surplus
+    from agent.equity import run_bigquery_equity_audit
     from agent.proof import invoke_managed_bigquery_mcp_smoke
     from agent.runtime import run_root_agent
 
@@ -110,6 +107,14 @@ async def main() -> int:
     if not args.skip_mcp:
         output["managed_bigquery_mcp"] = await invoke_managed_bigquery_mcp_smoke()
 
+    if not args.skip_ten_match:
+        output["ten_match_equity_proof"] = await asyncio.to_thread(
+            run_bigquery_equity_audit,
+            project_id=args.project,
+            dataset=args.dataset,
+            requested_at=now,
+        )
+
     print(json.dumps(output, indent=2, sort_keys=True))
     matcher_ok = bool(
         matcher_result["retrieval_evidence"].get("vector_search")
@@ -118,7 +123,10 @@ async def main() -> int:
     )
     agent_ok = args.skip_agent or bool(output["adk"]["match_tool_succeeded"])
     mcp_ok = args.skip_mcp or bool(output["managed_bigquery_mcp"]["ok"])
-    return 0 if matcher_ok and agent_ok and mcp_ok else 1
+    ten_match_ok = args.skip_ten_match or bool(
+        output["ten_match_equity_proof"]["ten_match_proof"]["ok"]
+    )
+    return 0 if matcher_ok and agent_ok and mcp_ok and ten_match_ok else 1
 
 
 if __name__ == "__main__":

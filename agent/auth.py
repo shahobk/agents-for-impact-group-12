@@ -75,10 +75,7 @@ class TokenAuthority:
         now: datetime | None = None,
     ) -> str:
         """Issue a replayable opaque token without persisting its raw value."""
-        token_bytes = hmac.new(
-            self.pepper.encode("utf-8"), token_key.encode("utf-8"), hashlib.sha256
-        ).digest()
-        raw_token = base64.urlsafe_b64encode(token_bytes).rstrip(b"=").decode("ascii")
+        raw_token = self.derive_deterministic(token_key)
         issued_at = now or utc_now()
         state["access_tokens"].setdefault(
             self.digest(raw_token),
@@ -93,6 +90,13 @@ class TokenAuthority:
             },
         )
         return raw_token
+
+    def derive_deterministic(self, token_key: str) -> str:
+        """Regenerate a scoped demo token without reading or writing persistence."""
+        token_bytes = hmac.new(
+            self.pepper.encode("utf-8"), token_key.encode("utf-8"), hashlib.sha256
+        ).digest()
+        return base64.urlsafe_b64encode(token_bytes).rstrip(b"=").decode("ascii")
 
     def authenticate(
         self,

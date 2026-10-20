@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+import copy
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import re
 import secrets
+import threading
+import time
 from typing import Any, Literal, Mapping
+from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,9 +23,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .agent import MatcherUnavailableError, match_surplus_offer, root_agent
 from .auth import AuthorizationError, TokenAuthority
 from .config import settings
+from .equity import run_bigquery_equity_audit
+from .intake import (
+    IntakeError,
+    IntakeInterpreter,
+    build_gemini_photo_provider,
+)
+from .locations import (
+    LocationError,
+    LocationService,
+    RouteEstimator,
+    build_google_geocoder,
+    build_google_routes_provider,
+    within_atlanta_service_area,
+)
 from .repository import FirestoreWorkflowRepository, InMemoryWorkflowRepository
 from .proof import check_agent_dependencies
-from .runtime import AgentRuntimeUnavailable, run_root_agent
+from .runtime import AgentRuntimeUnavailable, match_offer_via_root_agent, run_root_agent
 from .tasks import CloudTasksScheduler, InMemoryTaskScheduler, TaskOidcVerifier
 from .workflow import WorkflowError, WorkflowService
 
@@ -68,6 +88,14 @@ class MatchRequest(BaseModel):
             raise ValueError("pickup_deadline must include a timezone offset")
         return value
 
+    @model_validator(mode="after")
+    def atlanta_service_area(self) -> "MatchRequest":
+        if not within_atlanta_service_area(
+            self.donor_latitude, self.donor_longitude
+        ):
+            raise ValueError("donor coordinates must be within the Atlanta service area")
+        return self
+
 
 class MatchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -98,6 +126,14 @@ class OfferCreateRequest(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("pickup_deadline must include a timezone offset")
         return value
+
+    @model_validator(mode="after")
+    def atlanta_service_area(self) -> "OfferCreateRequest":
+        if not within_atlanta_service_area(
+            self.donor_latitude, self.donor_longitude
+        ):
+            raise ValueError("donor coordinates must be within the Atlanta service area")
+        return self
 
 
 class DeclineRequest(BaseModel):
@@ -139,6 +175,32 @@ class AdvanceTaskRequest(BaseModel):
 
 class AgentRunRequest(BaseModel):
     prompt: str = Field(min_length=3, max_length=8_000)
+
+
+class IntakePhotoRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    mime_type: str = Field(min_length=3, max_length=100)
+    data_base64: str = Field(min_length=4, max_length=8_000_000)
+
+
+class IntakeExtractRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    text: str = Field(default="", max_length=4_000)
+    transcript: str = Field(default="", max_length=4_000)
+    photo: IntakePhotoRequest | None = None
+    now: datetime | None = None
+
+    @field_validator("now")
+    @classmethod
+    def now_requires_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("now must include a timezone offset")
+        return value
+
+
+class GeocodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    address: str = Field(min_length=3, max_length=500)
 
 
 def _normalize_response(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -184,11 +246,22 @@ def _build_scheduler() -> Any:
 repository = _build_repository()
 scheduler = _build_scheduler()
 token_authority = TokenAuthority(settings.token_pepper, settings.coordinator_token)
+route_provider = (
+    build_google_routes_provider(
+        project=settings.google_cloud_project,
+        timeout_seconds=settings.maps_timeout_seconds,
+    )
+    if settings.enable_google_routes
+    else None
+)
 workflow = WorkflowService(
     repository,
     token_authority,
     scheduler,
-    matcher=match_surplus_offer if settings.workflow_matcher_enabled else None,
+    # Offer creation must traverse root_agent -> match_surplus_offer through an
+    # ADK Runner. The direct matcher remains the compatibility /api/match path.
+    matcher=match_offer_via_root_agent if settings.workflow_matcher_enabled else None,
+    route_estimator=RouteEstimator(route_provider),
     demo_mode=settings.demo_mode,
     demo_fallback=settings.workflow_demo_fallback,
     hold_minutes=settings.hold_minutes,
@@ -199,6 +272,62 @@ task_verifier = TaskOidcVerifier(
     settings.cloud_tasks_service_account,
     settings.task_local_secret,
 )
+photo_provider = (
+    build_gemini_photo_provider(
+        project=settings.google_cloud_project,
+        location=settings.cloud_tasks_location,
+        model=settings.photo_intake_model,
+    )
+    if settings.enable_photo_intake
+    else None
+)
+intake_interpreter = IntakeInterpreter(
+    photo_provider=photo_provider,
+    max_photo_bytes=settings.max_photo_bytes,
+)
+geocode_provider = (
+    build_google_geocoder(
+        project=settings.google_cloud_project,
+        timeout_seconds=settings.maps_timeout_seconds,
+    )
+    if settings.enable_google_geocoding
+    else None
+)
+location_service = LocationService(geocode_provider)
+
+
+class TokenBucketRateLimiter:
+    def __init__(self, *, capacity: int = 30, refill_per_second: float = 0.5) -> None:
+        self.capacity = float(capacity)
+        self.refill_per_second = refill_per_second
+        self._buckets: dict[str, tuple[float, float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, *, now: float | None = None) -> bool:
+        at = time.monotonic() if now is None else now
+        with self._lock:
+            tokens, updated = self._buckets.get(key, (self.capacity, at))
+            tokens = min(
+                self.capacity,
+                tokens + max(0.0, at - updated) * self.refill_per_second,
+            )
+            allowed = tokens >= 1
+            self._buckets[key] = (tokens - 1 if allowed else tokens, at)
+            return allowed
+
+
+paid_rate_limiter = TokenBucketRateLimiter()
+_PAID_PUBLIC_PATHS = {
+    "/api/intake/extract",
+    "/api/locations/geocode",
+    "/api/match",
+    "/api/offers",
+}
+_MAX_PUBLIC_REQUEST_BYTES = 8_500_000
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_equity_cache: dict[str, Any] = {}
+_equity_cache_lock = asyncio.Lock()
+_EQUITY_CACHE_SECONDS = 30 * 60
 
 
 app = FastAPI(
@@ -211,8 +340,72 @@ app.add_middleware(
     allow_origins=list(settings.cors_allow_origins),
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Idempotency-Key"],
+    allow_headers=["Content-Type", "Authorization", "X-Idempotency-Key", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
 )
+
+
+def _harden_response(response: Response, request_id: str) -> Response:
+    """Apply browser-facing security policy consistently, including errors."""
+    response.headers["X-Request-ID"] = request_id
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    )
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = (
+        "geolocation=(self), microphone=(self), camera=()"
+    )
+    return response
+
+
+@app.middleware("http")
+async def request_safety_middleware(request: Request, call_next):
+    supplied = request.headers.get("X-Request-ID", "")
+    request_id = supplied if _REQUEST_ID.fullmatch(supplied) else uuid4().hex
+    request.state.request_id = request_id
+    started = time.monotonic()
+    if request.method == "POST" and request.url.path in _PAID_PUBLIC_PATHS:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > _MAX_PUBLIC_REQUEST_BYTES:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"detail": {"code": "request_too_large", "message": "Request body is too large."}},
+                    )
+                    return _harden_response(response, request_id)
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"detail": {"code": "invalid_content_length", "message": "Invalid Content-Length header."}},
+                )
+                return _harden_response(response, request_id)
+        client_key = request.client.host if request.client else "unknown"
+        if not paid_rate_limiter.allow(client_key):
+            response = JSONResponse(
+                status_code=429,
+                content={"detail": {"code": "rate_limited", "message": "Too many paid-operation requests. Try again shortly."}},
+                headers={"Retry-After": "2"},
+            )
+            return _harden_response(response, request_id)
+    response = await call_next(request)
+    _harden_response(response, request_id)
+    logger.info(
+        "request_complete",
+        extra={
+            "request_id": request_id,
+            "http_method": request.method,
+            "http_path": request.url.path,
+            "status_code": response.status_code,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+        },
+    )
+    return response
 
 
 @app.exception_handler(WorkflowError)
@@ -225,6 +418,22 @@ async def authorization_error_handler(_request: Request, exc: AuthorizationError
     return JSONResponse(status_code=exc.status_code, content={"detail": {"code": exc.code, "message": str(exc)}}, headers={"WWW-Authenticate": "Bearer"})
 
 
+@app.exception_handler(IntakeError)
+async def intake_error_handler(_request: Request, exc: IntakeError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": {"code": exc.code, "message": str(exc)}},
+    )
+
+
+@app.exception_handler(LocationError)
+async def location_error_handler(_request: Request, exc: LocationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": {"code": exc.code, "message": str(exc)}},
+    )
+
+
 def _bearer(authorization: str | None) -> str | None:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
@@ -233,6 +442,128 @@ def _bearer(authorization: str | None) -> str | None:
 
 def _idempotency(value: str | None) -> str:
     return value or secrets.token_urlsafe(18)
+
+
+def _safe_equity_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    posting_keys = {
+        "posting_id",
+        "selected_recipient_id",
+        "no_match",
+        "eligible_count",
+        "tract_geo_id",
+        "poverty_rate",
+        "no_vehicle_rate",
+        "need_score",
+        "need_evidence_source",
+    }
+    retrieval_keys = {
+        "provider",
+        "job_id",
+        "location",
+        "query_label",
+        "job_labels",
+        "sql_fingerprint_sha256",
+        "vector_search",
+        "use_brute_force",
+        "top_k",
+        "result_count",
+        "total_bytes_processed",
+    }
+    postings = []
+    for item in value.get("postings", []) if isinstance(value.get("postings"), list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        safe = {key: item.get(key) for key in posting_keys if key in item}
+        evidence = item.get("retrieval_evidence")
+        if isinstance(evidence, Mapping):
+            safe["retrieval_evidence"] = {
+                key: evidence.get(key) for key in retrieval_keys if key in evidence
+            }
+        postings.append(safe)
+    summary_keys = {
+        "status",
+        "expected_postings",
+        "posting_count",
+        "matched_postings",
+        "no_match_postings",
+        "tract_evidence_count",
+        "weekly_households_fallback_count",
+        "selected_mean_poverty_rate",
+        "selected_mean_no_vehicle_rate",
+        "source_job_id",
+        "vector_job_ids",
+        "generated_assumptions",
+        "limitations",
+    }
+    safe_result = {key: copy.deepcopy(value.get(key)) for key in summary_keys if key in value}
+    safe_result["postings"] = postings
+    proof = value.get("ten_match_proof")
+    if isinstance(proof, Mapping):
+        proof_keys = {
+            "ok",
+            "expected_matches",
+            "match_execution_count",
+            "vector_job_count",
+            "unique_vector_job_count",
+            "all_results_recorded",
+            "all_jobs_labeled",
+            "all_jobs_brute_force_vector_search",
+            "job_ids",
+        }
+        safe_result["ten_match_proof"] = {
+            key: copy.deepcopy(proof.get(key)) for key in proof_keys if key in proof
+        }
+    return safe_result
+
+
+async def _get_equity_audit() -> dict[str, Any]:
+    now = time.monotonic()
+    cached_at = _equity_cache.get("cached_at")
+    if cached_at is not None and now - float(cached_at) < _EQUITY_CACHE_SECONDS:
+        result = copy.deepcopy(_equity_cache["result"])
+        result["execution"] = {
+            "source": "cache",
+            "generated_at": _equity_cache["generated_at"],
+            "served_at": datetime.now(timezone.utc).isoformat(),
+            "cache_ttl_seconds": _EQUITY_CACHE_SECONDS,
+        }
+        return result
+    async with _equity_cache_lock:
+        now = time.monotonic()
+        cached_at = _equity_cache.get("cached_at")
+        if cached_at is not None and now - float(cached_at) < _EQUITY_CACHE_SECONDS:
+            result = copy.deepcopy(_equity_cache["result"])
+            result["execution"] = {
+                "source": "cache",
+                "generated_at": _equity_cache["generated_at"],
+                "served_at": datetime.now(timezone.utc).isoformat(),
+                "cache_ttl_seconds": _EQUITY_CACHE_SECONDS,
+            }
+            return result
+        try:
+            raw = await asyncio.to_thread(
+                run_bigquery_equity_audit,
+                project_id=settings.google_cloud_project,
+            )
+        except Exception as exc:
+            logger.warning("equity_audit_failed error_type=%s", type(exc).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="The live BigQuery equity audit is temporarily unavailable.",
+            ) from exc
+        generated_at = datetime.now(timezone.utc).isoformat()
+        safe = _safe_equity_result(raw)
+        _equity_cache.update(
+            {"cached_at": time.monotonic(), "generated_at": generated_at, "result": safe}
+        )
+        result = copy.deepcopy(safe)
+        result["execution"] = {
+            "source": "live_bigquery",
+            "generated_at": generated_at,
+            "served_at": datetime.now(timezone.utc).isoformat(),
+            "cache_ttl_seconds": _EQUITY_CACHE_SECONDS,
+        }
+        return result
 
 
 @app.get("/healthz", tags=["operations"])
@@ -249,6 +580,27 @@ async def readiness(authorization: str | None = Header(default=None)) -> JSONRes
         "scheduler": {"ok": False, "backend": type(scheduler).__name__},
         "adk": {"ok": root_agent is not None},
         "bigquery_mcp": {"ok": bool(settings.enable_bigquery_mcp and root_agent is not None), "enabled": settings.enable_bigquery_mcp, "note": "Managed MCP smoke evidence is recorded separately from readiness configuration."},
+        "photo_intake": {
+            "enabled": settings.enable_photo_intake,
+            "ok": not settings.enable_photo_intake or photo_provider is not None,
+            "probe": "provider_configuration_only",
+            "external_verified": False,
+            "note": "No paid model call is made by readiness.",
+        },
+        "geocoding": {
+            "enabled": settings.enable_google_geocoding,
+            "ok": not settings.enable_google_geocoding or geocode_provider is not None,
+            "probe": "provider_configuration_only",
+            "external_verified": False,
+            "note": "No paid geocoding call is made by readiness.",
+        },
+        "routes": {
+            "enabled": settings.enable_google_routes,
+            "ok": not settings.enable_google_routes or route_provider is not None,
+            "probe": "provider_configuration_only",
+            "external_verified": False,
+            "note": "No paid route call is made by readiness.",
+        },
     }
     try:
         dependencies["repository"]["ok"] = bool(repository.ping())
@@ -260,7 +612,13 @@ async def readiness(authorization: str | None = Header(default=None)) -> JSONRes
         logger.exception("Cloud Tasks readiness check failed")
         dependencies["scheduler"]["error"] = "dependency_check_failed"
         dependencies["scheduler"]["error_type"] = type(exc).__name__
-    required_ok = dependencies["repository"]["ok"] and dependencies["scheduler"]["ok"]
+    required_ok = (
+        dependencies["repository"]["ok"]
+        and dependencies["scheduler"]["ok"]
+        and dependencies["photo_intake"]["ok"]
+        and dependencies["geocoding"]["ok"]
+        and dependencies["routes"]["ok"]
+    )
     if settings.repository_backend == "firestore":
         agent_dependencies = await check_agent_dependencies()
         dependencies["agent_dependencies"] = agent_dependencies["checks"]
@@ -306,6 +664,25 @@ async def create_match(request: MatchRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="The matching service is temporarily unavailable.") from exc
 
 
+@app.post("/api/intake/extract", tags=["intake"])
+async def extract_intake(request: IntakeExtractRequest) -> dict[str, Any]:
+    """Return editable suggestions; this endpoint never creates an offer."""
+    photo = request.photo
+    return await intake_interpreter.extract(
+        text=request.text,
+        transcript=request.transcript,
+        photo_mime_type=photo.mime_type if photo else None,
+        photo_base64=photo.data_base64 if photo else None,
+        now=request.now,
+    )
+
+
+@app.post("/api/locations/geocode", tags=["locations"])
+async def geocode_location(request: GeocodeRequest) -> dict[str, Any]:
+    """Return a single Atlanta-biased candidate for explicit donor review."""
+    return await location_service.geocode(request.address)
+
+
 @app.post("/api/offers", status_code=201, tags=["workflow"])
 async def create_offer(request: OfferCreateRequest, x_idempotency_key: str | None = Header(default=None)) -> dict[str, Any]:
     return await workflow.create_offer(request.model_dump(mode="json"), idempotency_key=_idempotency(x_idempotency_key))
@@ -319,6 +696,12 @@ async def offer_status(authorization: str | None = Header(default=None)) -> dict
 @app.get("/api/recipients/notifications", tags=["workflow"])
 async def recipient_notifications(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     return workflow.inbox(_bearer(authorization) or "")
+
+
+@app.get("/api/public/summary", tags=["workflow"])
+async def public_summary() -> dict[str, Any]:
+    """Return aggregate demo metrics without identities, locations, or tokens."""
+    return workflow.public_summary()
 
 
 @app.post("/api/offers/{offer_id}/claim", tags=["workflow"])
@@ -358,7 +741,7 @@ async def ops_offers(authorization: str | None = Header(default=None)) -> dict[s
 @app.get("/api/ops/equity-audit", tags=["operations"])
 async def equity_audit(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     token_authority.authenticate_coordinator(_bearer(authorization))
-    return workflow.equity_audit()
+    return await _get_equity_audit()
 
 
 @app.post("/api/ops/ask", tags=["operations"])

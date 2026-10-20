@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from google.cloud import bigquery
 
@@ -122,15 +123,53 @@ def update_table(client: bigquery.Client, dataset: str, table_name: str) -> None
     print(f"{updated.full_table_id}: {described}/{len(updated.schema)} columns described")
 
 
-def main() -> None:
+def check_table(client: bigquery.Client, dataset: str, table_name: str) -> dict[str, object]:
+    """Read and verify descriptions without mutating BigQuery metadata."""
+
+    metadata = TABLES[table_name]
+    table_id = f"{client.project}.{dataset}.{table_name}"
+    table = client.get_table(table_id)
+    descriptions = metadata["columns"]
+    actual = {field.name for field in table.schema}
+    expected = set(descriptions)
+    schema_matches = actual == expected
+    described_columns = sum(bool(field.description) for field in table.schema)
+    column_descriptions_match = schema_matches and all(
+        field.description == descriptions[field.name] for field in table.schema
+    )
+    table_description_matches = table.description == metadata["description"]
+    return {
+        "table": table_id,
+        "ok": bool(column_descriptions_match and table_description_matches),
+        "schema_matches": schema_matches,
+        "table_description_matches": table_description_matches,
+        "column_descriptions_match": column_descriptions_match,
+        "described_columns": described_columns,
+        "column_count": len(table.schema),
+        "missing_description_map_entries": sorted(actual - expected),
+        "extra_description_map_entries": sorted(expected - actual),
+    }
+
+
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
     parser.add_argument("--dataset", default="a4i_food")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify current metadata only; do not update BigQuery.",
+    )
     args = parser.parse_args()
     client = bigquery.Client(project=args.project)
+    if args.check:
+        results = [check_table(client, args.dataset, table_name) for table_name in TABLES]
+        print(json.dumps({"ok": all(item["ok"] for item in results), "tables": results}, indent=2, sort_keys=True))
+        return 0 if all(item["ok"] for item in results) else 1
     for table_name in TABLES:
         update_table(client, args.dataset, table_name)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

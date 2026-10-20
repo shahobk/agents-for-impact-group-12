@@ -5,7 +5,7 @@ import asyncio
 from google.adk.events import Event
 from google.genai import types
 
-from agent.equity import summarize_equity_audit
+from agent.equity import summarize_equity_audit, validate_ten_match_proof
 from agent.proof import invoke_managed_bigquery_mcp_smoke
 from agent.runtime import summarize_adk_events
 
@@ -148,4 +148,32 @@ def test_equity_audit_counts_tract_evidence_and_explicit_fallbacks() -> None:
     assert audit["tract_evidence_count"] == 1
     assert audit["weekly_households_fallback_count"] == 1
     assert audit["selected_mean_poverty_rate"] == 0.2
+
+
+def test_ten_match_proof_requires_ten_unique_labeled_brute_force_jobs() -> None:
+    records = [
+        {
+            "posting_id": index,
+            "selected_recipient_id": f"recipient-{index}",
+            "no_match": False,
+            "retrieval_evidence": {
+                "job_id": f"job-{index}",
+                "query_label": "pantry_relay_vector_search",
+                "job_labels": {"workload": "pantry_relay_vector_search"},
+                "vector_search": True,
+                "use_brute_force": True,
+                "top_k": 30,
+            },
+        }
+        for index in range(10)
+    ]
+
+    proof = validate_ten_match_proof(records)
+
+    assert proof["ok"] is True
+    assert proof["match_execution_count"] == 10
+    assert proof["unique_vector_job_count"] == 10
+
+    records[-1]["retrieval_evidence"]["job_id"] = "job-8"
+    assert validate_ten_match_proof(records)["ok"] is False
 

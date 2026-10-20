@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -11,11 +12,14 @@ import uuid
 from typing import Any
 
 from .auth import AuthorizationError, TokenAuthority, parse_time, utc_now
+from .foodkeeper import lookup_foodkeeper
+from .locations import RouteEstimator, haversine_route, within_atlanta_service_area
 from .repository import WorkflowRepository
 from .tasks import TaskScheduler
 
 
 TERMINAL_STATUSES = {"completed", "failed", "expired", "cancelled", "no_match"}
+ROUTE_HANDLING_BUFFER_MINUTES = 30.0
 CANDIDATE_RESPONSES = {
     "pending",
     "declined",
@@ -70,6 +74,7 @@ def _demo_candidates() -> list[dict[str, Any]]:
                 "capacity_margin_pallets": capacity - 1,
                 "cold_storage": "walk-in",
                 "refrigerated_transport": True,
+                "pickup_window_hours": 12,
                 "selection_reason": (
                     f"Eligible cold-chain recipient {distance:.1f} miles away with known capacity."
                 ),
@@ -98,6 +103,7 @@ class WorkflowService:
         scheduler: TaskScheduler,
         *,
         matcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        route_estimator: RouteEstimator | None = None,
         demo_mode: bool = True,
         demo_fallback: bool = True,
         hold_minutes: int = 10,
@@ -107,6 +113,7 @@ class WorkflowService:
         self.tokens = token_authority
         self.scheduler = scheduler
         self.matcher = matcher
+        self.route_estimator = route_estimator or RouteEstimator()
         self.demo_mode = demo_mode
         self.demo_fallback = demo_fallback
         self.hold_minutes = hold_minutes
@@ -146,6 +153,7 @@ class WorkflowService:
         safe_result = dict(result)
         safe_result.pop("status_token", None)
         safe_result.pop("recipient_access", None)
+        safe_result.pop("_tasks", None)
         state["command_receipts"][receipt_id] = {
             "request_hash": _canonical_hash(request),
             "completed": True,
@@ -175,7 +183,15 @@ class WorkflowService:
             }
         )
 
-    async def _candidates(self, payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    async def _candidates(
+        self, payload: Mapping[str, Any], now: datetime
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[str],
+        dict[str, Any],
+        dict[str, Any] | None,
+    ]:
         if self.matcher:
             try:
                 result = await self.matcher(
@@ -193,21 +209,219 @@ class WorkflowService:
                     ),
                     donor_delivery_radius_km=payload.get("donor_delivery_radius_km"),
                 )
-                eligible = [item for item in [result.get("selected"), *result.get("fallbacks", [])] if item]
+                supplied_eligible = result.get("eligible_candidates")
+                if isinstance(supplied_eligible, list):
+                    eligible = [
+                        dict(item)
+                        for item in supplied_eligible
+                        if isinstance(item, Mapping)
+                    ]
+                else:
+                    eligible = [
+                        dict(item)
+                        for item in [result.get("selected"), *result.get("fallbacks", [])]
+                        if isinstance(item, Mapping)
+                    ]
                 for rank, item in enumerate(eligible, 1):
                     item.setdefault("rank", rank)
                     item.setdefault("eligible", True)
                     if item.get("need_evidence") and not item.get("tract_need_evidence"):
                         item["tract_need_evidence"] = item["need_evidence"]
-                return eligible, list(result.get("rejections", [])), list(result.get("warnings", []))
-            except Exception:
+                route_rejections = await self._enrich_route_evidence(
+                    eligible, payload, now
+                )
+                raw_evidence = result.get("retrieval_evidence") or {}
+                if not isinstance(raw_evidence, Mapping):
+                    raw_evidence = {}
+                evidence = {
+                    key: raw_evidence.get(key)
+                    for key in (
+                        "provider",
+                        "job_id",
+                        "location",
+                        "query_label",
+                        "job_labels",
+                        "sql_fingerprint_sha256",
+                        "vector_search",
+                        "use_brute_force",
+                        "top_k",
+                        "result_count",
+                        "total_bytes_processed",
+                    )
+                    if raw_evidence.get(key) is not None
+                }
+                raw_trace = result.get("_agent_trace") or {}
+                agent_trace = None
+                if isinstance(raw_trace, Mapping):
+                    agent_trace = {
+                        "runner": str(raw_trace.get("runner") or "")[:120],
+                        "session_id": str(raw_trace.get("session_id") or "")[:200],
+                        "root_agent_observed": bool(
+                            raw_trace.get("root_agent_observed", False)
+                        ),
+                        "tool_name": (
+                            "match_surplus_offer"
+                            if raw_trace.get("tool_name") == "match_surplus_offer"
+                            else "unknown"
+                        ),
+                        "status": (
+                            "succeeded"
+                            if raw_trace.get("status") == "succeeded"
+                            else "error"
+                        ),
+                        "latency_ms": raw_trace.get("latency_ms"),
+                        "elapsed_ms": raw_trace.get("elapsed_ms"),
+                        "completed_at": raw_trace.get("completed_at"),
+                        # Use the independently allowlisted matcher evidence so
+                        # the trace and persisted match proof are correlated.
+                        "retrieval_evidence": dict(evidence),
+                    }
+                return (
+                    eligible,
+                    [*list(result.get("rejections", [])), *route_rejections],
+                    list(result.get("warnings", [])),
+                    evidence,
+                    agent_trace,
+                )
+            except Exception as exc:
                 if not self.demo_fallback:
-                    raise
+                    raise WorkflowError(
+                        "matcher_unavailable",
+                        "The ADK matching workflow is temporarily unavailable.",
+                        status_code=503,
+                    ) from exc
         if self.demo_fallback:
-            return _demo_candidates(), [], [
-                "Local deterministic demo candidates were used because cloud matching was unavailable."
-            ]
+            candidates = _demo_candidates()
+            route_rejections = await self._enrich_route_evidence(
+                candidates, payload, now
+            )
+            return (
+                candidates,
+                route_rejections,
+                [
+                    "Local deterministic demo candidates were used because cloud matching was unavailable."
+                ],
+                {
+                    "provider": "deterministic_demo_fallback",
+                    "vector_search": False,
+                },
+                None,
+            )
         raise WorkflowError("matcher_unavailable", "The matcher is unavailable.", status_code=503)
+
+    async def _enrich_route_evidence(
+        self,
+        candidates: list[dict[str, Any]],
+        payload: Mapping[str, Any],
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        """Reject route contradictions without ever resurrecting rejected rows."""
+        routable = [
+            candidate
+            for candidate in candidates
+            if candidate.get("latitude") is not None
+            and candidate.get("longitude") is not None
+        ]
+
+        async def enrich(
+            candidate: dict[str, Any], use_provider: bool,
+        ) -> tuple[dict[str, Any], list[str]]:
+            coordinates = (
+                float(payload["donor_latitude"]),
+                float(payload["donor_longitude"]),
+                float(candidate["latitude"]),
+                float(candidate["longitude"]),
+            )
+            evidence = (
+                await self.route_estimator.estimate(*coordinates)
+                if use_provider
+                else haversine_route(*coordinates)
+            )
+            candidate["travel"] = {
+                **dict(candidate.get("travel") or {}),
+                **evidence,
+            }
+            reasons: list[str] = []
+            minutes = float(evidence.get("estimated_minutes") or 0)
+            reasons.extend(
+                self._route_time_rejections(
+                    candidate,
+                    route_minutes=minutes,
+                    now=now,
+                    deadline=parse_time(str(payload["pickup_deadline"])),
+                    service_window_started_at=now,
+                )
+            )
+            if payload.get("transport_mode") == "donor_delivery":
+                radius_km = float(payload.get("donor_delivery_radius_km") or 5)
+                route_km = float(evidence.get("distance_miles") or 0) * 1.609344
+                if route_km > radius_km:
+                    reasons.append("route_exceeds_donor_delivery_radius")
+            return candidate, reasons
+
+        evaluated = await asyncio.gather(
+            *(
+                enrich(candidate, index < 3)
+                for index, candidate in enumerate(routable)
+            )
+        )
+        rejected: list[dict[str, Any]] = []
+        rejected_ids: set[int] = set()
+        for candidate, reasons in evaluated:
+            if reasons:
+                candidate.update({"eligible": False, "reasons": reasons})
+                rejected.append(dict(candidate))
+                rejected_ids.add(id(candidate))
+        if rejected_ids:
+            candidates[:] = [
+                candidate for candidate in candidates if id(candidate) not in rejected_ids
+            ]
+        for rank, candidate in enumerate(candidates, 1):
+            candidate["rank"] = rank
+        return rejected
+
+    @staticmethod
+    def _route_time_rejections(
+        candidate: Mapping[str, Any],
+        *,
+        route_minutes: float,
+        now: datetime,
+        deadline: datetime,
+        service_window_started_at: datetime,
+    ) -> list[str]:
+        """Reconcile route evidence with both deterministic time authorities.
+
+        The matcher reserves 30 minutes for handling and treats a recipient's
+        pickup window as an availability horizon beginning when matching
+        started. Route-provider output may only make that earlier decision
+        stricter, so the same margins are checked again before notification.
+        """
+        if route_minutes <= 0:
+            return ["route_cannot_meet_donor_deadline"]
+
+        expected_handoff = now + timedelta(
+            minutes=route_minutes + ROUTE_HANDLING_BUFFER_MINUTES
+        )
+        reasons: list[str] = []
+        if expected_handoff > deadline:
+            reasons.append("route_cannot_meet_donor_deadline")
+
+        pickup_window = candidate.get("pickup_window_hours")
+        if pickup_window is None:
+            clock = candidate.get("clock")
+            if isinstance(clock, Mapping):
+                pickup_window = clock.get("recipient_pickup_window_hours")
+        if pickup_window is not None:
+            try:
+                recipient_horizon = service_window_started_at + timedelta(
+                    hours=float(pickup_window)
+                )
+            except (TypeError, ValueError, OverflowError):
+                reasons.append("route_recipient_service_horizon_invalid")
+            else:
+                if expected_handoff > recipient_horizon:
+                    reasons.append("route_cannot_meet_recipient_service_horizon")
+        return reasons
 
     def _validate_offer(self, payload: Mapping[str, Any], now: datetime) -> dict[str, Any]:
         required = [
@@ -233,6 +447,11 @@ class WorkflowService:
         lat, lon = float(payload["donor_latitude"]), float(payload["donor_longitude"])
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             raise WorkflowError("invalid_location", "Invalid donor coordinates.")
+        if not within_atlanta_service_area(lat, lon):
+            raise WorkflowError(
+                "outside_atlanta_service_area",
+                "Donor coordinates must be within the Atlanta service area.",
+            )
         transport = str(payload.get("transport_mode", "recipient_pickup"))
         if transport not in {"recipient_pickup", "donor_delivery", "transportation_needed"}:
             raise WorkflowError("invalid_transport_mode", "Unsupported transport mode.")
@@ -266,9 +485,23 @@ class WorkflowService:
     ) -> dict[str, Any]:
         at = now or utc_now()
         clean = self._validate_offer(payload, at)
-        candidates, rejections, match_warnings = await self._candidates(clean)
         receipt_id = self._receipt_key("public-donor", "create-offer", idempotency_key)
         offer_id = _stable_id("offer", receipt_id)
+        existing = self.repository.snapshot()
+        replay = self._replay(existing, receipt_id, clean)
+        if replay:
+            result = self._create_response_tokens(
+                existing, offer_id, receipt_id, replay, at
+            )
+            result.pop("_tasks", None)
+            result["status_url"] = result["status_url"].replace(
+                "{status_token}", result["status_token"]
+            )
+            return result
+
+        candidates, rejections, match_warnings, match_evidence, agent_trace = (
+            await self._candidates(clean, at)
+        )
 
         def operation(state: dict[str, Any]) -> dict[str, Any]:
             replay = self._replay(state, receipt_id, clean)
@@ -347,10 +580,11 @@ class WorkflowService:
                 "candidates": {c["recipient_id"]: c for c in filtered},
                 "rejections": persisted_rejections,
                 "warnings": match_warnings,
+                "match_evidence": match_evidence,
+                "agent_trace": agent_trace,
                 "scheduler_warnings": [],
-                "foodkeeper_advisory": (
-                    {"source": "USDA FoodKeeper", "label": "Advisory only; donor deadline is authoritative", "summary": "Keep leafy greens refrigerated."}
-                    if "spinach" in clean["description"].lower() else None
+                "foodkeeper_advisory": lookup_foodkeeper(
+                    clean["description"], clean["storage_state"]
                 ),
             }
             state["offers"][offer_id] = offer
@@ -401,9 +635,10 @@ class WorkflowService:
             for rid, candidate in sorted(offer["candidates"].items(), key=lambda row: row[1]["rank"]):
                 raw = self.tokens.issue_deterministic(
                     state,
-                    token_key=f"demo-recipient:{rid}",
+                    token_key=f"demo-recipient:{offer_id}:{rid}",
                     actor_type="recipient",
                     actor_id=rid,
+                    offer_id=offer_id,
                     actions=["recipient:inbox", "offer:claim", "offer:decline", "reservation:confirm", "offer:complete"],
                     now=now,
                 )
@@ -555,6 +790,126 @@ class WorkflowService:
         self._schedule_descriptors(result.pop("_tasks", []), offer_id)
         return result
 
+    def _demo_recipient_access(self, offer: Mapping[str, Any]) -> list[dict[str, Any]]:
+        if not self.demo_mode:
+            return []
+        access: list[dict[str, Any]] = []
+        candidates = sorted(
+            offer["candidates"].values(),
+            key=lambda candidate: (candidate["rank"], candidate["recipient_id"]),
+        )
+        for candidate in candidates:
+            rid = candidate["recipient_id"]
+            raw = self.tokens.derive_deterministic(
+                f"demo-recipient:{offer['offer_id']}:{rid}"
+            )
+            access.append(
+                {
+                    "recipient_id": rid,
+                    "name": candidate.get("name", rid),
+                    "token": raw,
+                    "role_url": f"/?role=recipient#token={raw}",
+                    "wave": candidate.get("wave"),
+                    "notification_status": candidate.get("notification_status"),
+                }
+            )
+        return access
+
+    def _map_projection(
+        self,
+        state: Mapping[str, Any],
+        offer: Mapping[str, Any],
+        *,
+        viewer: str,
+        actor_id: str,
+    ) -> dict[str, Any]:
+        donor_visible = viewer in {"donor", "coordinator"} or (
+            viewer == "recipient"
+            and self._recipient_has_location_access(state, offer, actor_id)
+        )
+        donor = None
+        if donor_visible:
+            reviewed_address = offer.get("location_source") == "address"
+            donor = {
+                **offer["pickup_geopoint"],
+                "address": offer.get("pickup_address", ""),
+                "label": "Reviewed donor pickup location",
+                "precision": (
+                    "reviewed_address_candidate"
+                    if reviewed_address
+                    else "reviewed_exact"
+                ),
+            }
+        markers: list[dict[str, Any]] = []
+        for candidate in sorted(
+            offer["candidates"].values(), key=lambda item: item["rank"]
+        ):
+            recipient = state["recipients"].get(candidate["recipient_id"], {})
+            latitude = candidate.get("latitude", recipient.get("latitude"))
+            longitude = candidate.get("longitude", recipient.get("longitude"))
+            if latitude is None or longitude is None:
+                continue
+            travel = candidate.get("travel") or {}
+            transport = candidate.get("transport") or {}
+            markers.append(
+                {
+                    "recipient_id": candidate["recipient_id"],
+                    "name": candidate.get("name", candidate["recipient_id"]),
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "precision": "approximate_zip_centroid",
+                    "distance_miles": travel.get(
+                        "distance_miles", candidate.get("distance_miles")
+                    ),
+                    "estimated_minutes": travel.get("estimated_minutes"),
+                    "route_source": travel.get(
+                        "distance_source",
+                        transport.get(
+                            "distance_source",
+                            "haversine_from_approximate_zip_centroid",
+                        ),
+                    ),
+                    "traffic_aware": bool(travel.get("traffic_aware", False)),
+                    "safety_override": False,
+                    "selected": offer.get("selected_recipient_id")
+                    == candidate["recipient_id"],
+                    "response": candidate.get("response"),
+                }
+            )
+        return {
+            "donor": donor,
+            "recipients": markers,
+            "tracking": False,
+            "limitations": [
+                "Recipient markers are approximate ZIP centroids.",
+                "Route values are estimates, not live traffic or GPS tracking.",
+            ],
+        }
+
+    def _recipient_has_location_access(
+        self,
+        state: Mapping[str, Any],
+        offer: Mapping[str, Any],
+        recipient_id: str,
+    ) -> bool:
+        if offer.get("selected_recipient_id") != recipient_id:
+            return False
+        reservation_id = offer.get("active_reservation_id")
+        reservation = state["reservations"].get(reservation_id) if reservation_id else None
+        if not reservation or reservation.get("recipient_id") != recipient_id:
+            return False
+        status = offer.get("status")
+        if status == "reserved":
+            return reservation.get("status") == "active"
+        if status == "confirmed":
+            return reservation.get("status") == "confirmed"
+        if status == "completed":
+            return (
+                reservation.get("status") == "released"
+                and reservation.get("release_reason") == "completed"
+            )
+        return False
+
     def status(self, raw_token: str, *, now: datetime | None = None) -> dict[str, Any]:
         at = now or utc_now()
         snapshot = self.repository.snapshot()
@@ -563,25 +918,48 @@ class WorkflowService:
         self.advance_offer_if_due(offer_id, now=at)
         state = self.repository.snapshot()
         offer = state["offers"][offer_id]
-        return self._offer_projection(state, offer, viewer="donor", actor_id=offer_id)
+        result = self._offer_projection(
+            state, offer, viewer="donor", actor_id=offer_id
+        )
+        if self.demo_mode:
+            # These raw tokens are regenerated only after donor authorization;
+            # they remain absent from persistence, logs, public summaries, and
+            # coordinator responses.
+            result["demo_recipient_access"] = self._demo_recipient_access(offer)
+        return result
 
     def inbox(self, raw_token: str, *, now: datetime | None = None) -> dict[str, Any]:
         at = now or utc_now()
         state = self.repository.snapshot()
         token = self.tokens.authenticate(state, raw_token, action="recipient:inbox", now=at)
         rid = token["actor_id"]
-        relevant = [n for n in state["notifications"].values() if n["recipient_id"] == rid]
+        scoped_offer_id = token.get("offer_id")
+        relevant = [
+            n
+            for n in state["notifications"].values()
+            if n["recipient_id"] == rid
+            and (scoped_offer_id is None or n["offer_id"] == scoped_offer_id)
+        ]
         for note in relevant:
             self.advance_offer_if_due(note["offer_id"], now=at)
         state = self.repository.snapshot()
         notes = []
-        for note in sorted((n for n in state["notifications"].values() if n["recipient_id"] == rid), key=lambda n: n["created_at"], reverse=True):
+        for note in sorted(
+            (
+                n
+                for n in state["notifications"].values()
+                if n["recipient_id"] == rid
+                and (scoped_offer_id is None or n["offer_id"] == scoped_offer_id)
+            ),
+            key=lambda n: n["created_at"],
+            reverse=True,
+        ):
             offer = state["offers"][note["offer_id"]]
             candidate = offer["candidates"][rid]
             donor_location = None
-            if offer.get("selected_recipient_id") == rid and offer["status"] in {"reserved", "confirmed", "completed"}:
+            if self._recipient_has_location_access(state, offer, rid):
                 donor_location = {"address": offer["pickup_address"], **offer["pickup_geopoint"]}
-            notes.append({**note, "response": candidate["response"], "offer": {"description": offer["description_structured"], "quantity_original": offer["quantity_original"], "quantity_pallets": offer["quantity_pallets"], "storage_state": offer["storage_state"], "transport_mode": offer["transport_mode"], "distance_miles": candidate.get("distance_miles"), "deadline": offer["deadline"], "status": offer["status"], "donor_location": donor_location}})
+            notes.append({**note, "response": candidate["response"], "offer": {"description": offer["description_structured"], "quantity_original": offer["quantity_original"], "quantity_pallets": offer["quantity_pallets"], "storage_state": offer["storage_state"], "transport_mode": offer["transport_mode"], "distance_miles": candidate.get("distance_miles"), "deadline": offer["deadline"], "status": offer["status"], "donor_location": donor_location, "map": self._map_projection(state, offer, viewer="recipient", actor_id=rid)}})
             if offer.get("selected_recipient_id") == rid and offer.get("active_reservation_id"):
                 notes[-1]["reservation"] = state["reservations"].get(offer["active_reservation_id"])
         return {"recipient": state["recipients"].get(rid, {"recipient_id": rid, "name": rid}), "notifications": notes}
@@ -592,7 +970,7 @@ class WorkflowService:
             public.pop("pickup_geopoint", None)
             public.pop("pickup_address", None)
         reservation = state["reservations"].get(offer.get("active_reservation_id"))
-        return {"offer": public, "events": list(state["events"].get(offer["offer_id"], [])), "candidates": sorted(offer["candidates"].values(), key=lambda c: c["rank"]), "reservation": reservation}
+        return {"offer": public, "events": list(state["events"].get(offer["offer_id"], [])), "candidates": sorted(offer["candidates"].values(), key=lambda c: c["rank"]), "reservation": reservation, "map": self._map_projection(state, offer, viewer=viewer, actor_id=actor_id)}
 
     def claim(self, offer_id: str, raw_token: str, request: Mapping[str, Any], *, idempotency_key: str, now: datetime | None = None) -> dict[str, Any]:
         at = now or utc_now()
@@ -721,6 +1099,15 @@ class WorkflowService:
             if offer["status"] != "confirmed":
                 raise WorkflowError("offer_not_confirmed", "Only a confirmed offer can be completed.", status_code=409)
             reservation = state["reservations"][offer["active_reservation_id"]]
+            if token["actor_type"] == "recipient" and (
+                token["actor_id"] != offer.get("selected_recipient_id")
+                or token["actor_id"] != reservation.get("recipient_id")
+            ):
+                raise AuthorizationError(
+                    "winner_scope_mismatch",
+                    "Only the selected recipient may complete this offer.",
+                    status_code=403,
+                )
             self._release_capacity(state, reservation, at)
             reservation["status"] = "released"
             reservation["release_reason"] = "completed"
@@ -734,21 +1121,99 @@ class WorkflowService:
             return result
         return self.repository.transact(operation)
 
+    def _summary(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        offers = list(state["offers"].values())
+        completed = [offer for offer in offers if offer["status"] == "completed"]
+        completed_quantity = sum(
+            float(offer.get("completed_quantity") or 0) for offer in completed
+        )
+        actual_quantity = sum(
+            float(offer.get("completed_quantity") or 0)
+            for offer in completed
+            if not offer.get("completed_quantity_estimated", False)
+        )
+        estimated_quantity = completed_quantity - actual_quantity
+        activity = {
+            "as_of": _iso(utc_now()),
+            "data_scope": "this_demo_environment",
+            "authoritative_workflow_snapshot": True,
+            "external_live_capacity": False,
+            "total_offers": len(offers),
+            "active_offers": sum(
+                offer["status"] not in TERMINAL_STATUSES for offer in offers
+            ),
+            "waiting_offers": sum(offer["status"] == "notified" for offer in offers),
+            "active_holds": sum(offer["status"] == "reserved" for offer in offers),
+            "confirmed_handoffs": sum(
+                offer["status"] == "confirmed" for offer in offers
+            ),
+            "needs_transport": sum(
+                offer["status"] == "needs_transport" for offer in offers
+            ),
+            "no_match": sum(offer["status"] == "no_match" for offer in offers),
+            "simulated_notifications_created": len(state["notifications"]),
+        }
+        impact = {
+            "completed_offers": len(completed),
+            "completed_quantity_pallets": completed_quantity,
+            "actual_quantity_pallets": actual_quantity,
+            "estimated_quantity_pallets": estimated_quantity,
+        }
+        return {"activity": activity, "impact": impact}
+
+    def public_summary(self) -> dict[str, Any]:
+        summary = self._summary(self.repository.snapshot())
+        return {
+            **summary,
+            "labels": {
+                "notifications": "Simulated in-app delivery",
+                "recipient_operations": "Generated profiles; live confirmation required",
+                "locations": "Recipient points are approximate ZIP centroids",
+                "impact": "Only completed workflow offers are counted",
+            },
+        }
+
     def ops_offers(self) -> dict[str, Any]:
         state = self.repository.snapshot()
         offers = []
-        completed_quantity = 0.0
         for offer in sorted(state["offers"].values(), key=lambda item: item["created_at"], reverse=True):
             offers.append(self._offer_projection(state, offer, viewer="coordinator", actor_id="coordinator"))
-            if offer["status"] == "completed":
-                completed_quantity += float(offer.get("completed_quantity") or 0)
-        return {"offers": offers, "impact": {"completed_offers": sum(1 for o in state["offers"].values() if o["status"] == "completed"), "completed_quantity_pallets": completed_quantity}}
+        return {"offers": offers, **self._summary(state)}
 
     def ops_action(self, offer_id: str, action: str, request: Mapping[str, Any], *, idempotency_key: str, now: datetime | None = None) -> dict[str, Any]:
         at = now or utc_now()
         receipt_id = self._receipt_key("coordinator", f"{action}:{offer_id}", idempotency_key)
         if action in {"expire", "promote"}:
-            return self.advance_offer_if_due(offer_id, force=True, now=at)
+            def advance_operation(state: dict[str, Any]) -> dict[str, Any]:
+                replay = self._replay(state, receipt_id, request)
+                if replay:
+                    return replay
+                offer = state["offers"].get(offer_id)
+                if not offer:
+                    raise WorkflowError(
+                        "offer_not_found", "Offer not found.", status_code=404
+                    )
+                if action == "promote" and offer.get("active_reservation_id"):
+                    raise WorkflowError(
+                        "active_reservation",
+                        "A wave cannot be promoted while a reservation is active.",
+                        status_code=409,
+                    )
+                changed, tasks = self._advance_state(
+                    state, offer, at, force=True
+                )
+                result = {
+                    "offer_id": offer_id,
+                    "status": offer["status"],
+                    "advanced": changed,
+                    "_tasks": tasks,
+                }
+                self._save_receipt(state, receipt_id, request, result, at)
+                return result
+
+            advanced = self.repository.transact(advance_operation)
+            self._schedule_descriptors(advanced.pop("_tasks", []), offer_id)
+            return advanced
         def operation(state: dict[str, Any]) -> dict[str, Any]:
             replay = self._replay(state, receipt_id, request)
             if replay:
@@ -757,13 +1222,13 @@ class WorkflowService:
             if not offer:
                 raise WorkflowError("offer_not_found", "Offer not found.", status_code=404)
             if action in {"cancel", "fail"}:
-                if offer["status"] in {"completed", "cancelled", "failed"}:
+                if offer["status"] in TERMINAL_STATUSES:
                     raise WorkflowError("invalid_transition", "Offer cannot transition from its current state.", status_code=409)
                 if offer.get("active_reservation_id"):
                     reservation = state["reservations"][offer["active_reservation_id"]]
                     self._release_capacity(state, reservation, at)
                     reservation.update({"status": "released", "release_reason": action})
-                offer.update({"status": "cancelled" if action == "cancel" else "failed", "outcome_reason": str(request.get("reason", ""))[:500], "active_reservation_id": None, "reservation_expires_at": None, "updated_at": _iso(at)})
+                offer.update({"status": "cancelled" if action == "cancel" else "failed", "outcome_reason": str(request.get("reason", ""))[:500], "active_reservation_id": None, "reservation_expires_at": None, "selected_recipient_id": None, "updated_at": _iso(at)})
                 for candidate in offer["candidates"].values():
                     if candidate["response"] in {"pending", "holding", "won"}:
                         candidate["response"] = "invalidated"
@@ -779,6 +1244,50 @@ class WorkflowService:
                     raise WorkflowError("delivery_radius_exceeded", "Donor delivery radius must be at most 5 km.")
                 offer["transport_mode"] = mode
                 offer["donor_delivery_radius_km"] = float(radius) if mode == "donor_delivery" else None
+                rejected_ids: list[str] = []
+                for rid, candidate in offer["candidates"].items():
+                    travel = candidate.get("travel") or {}
+                    known_distances = [
+                        float(value)
+                        for value in (
+                            travel.get("distance_miles"),
+                            candidate.get("distance_miles"),
+                        )
+                        if value is not None
+                    ]
+                    distance_miles = max(known_distances) if known_distances else None
+                    estimated_minutes = travel.get("estimated_minutes")
+                    reasons: list[str] = []
+                    if estimated_minutes is not None:
+                        reasons.extend(
+                            self._route_time_rejections(
+                                candidate,
+                                route_minutes=float(estimated_minutes),
+                                now=at,
+                                deadline=parse_time(offer["deadline"]),
+                                service_window_started_at=parse_time(
+                                    offer["created_at"]
+                                ),
+                            )
+                        )
+                    if mode == "donor_delivery":
+                        if distance_miles is None or float(distance_miles) * 1.609344 > float(radius):
+                            reasons.append("route_exceeds_donor_delivery_radius")
+                    if reasons:
+                        rejected = dict(candidate)
+                        rejected.update({"eligible": False, "reasons": reasons})
+                        offer["rejections"].append(rejected)
+                        rejected_ids.append(rid)
+                for rid in rejected_ids:
+                    del offer["candidates"][rid]
+                for rank, candidate in enumerate(
+                    sorted(
+                        offer["candidates"].values(),
+                        key=lambda item: (item["rank"], item["recipient_id"]),
+                    ),
+                    1,
+                ):
+                    candidate["rank"] = rank
                 self._open_next_wave(state, offer, at)
             else:
                 raise WorkflowError("unsupported_action", "Unsupported coordinator action.", status_code=404)
