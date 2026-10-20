@@ -29,6 +29,9 @@ gcloud services enable \
   aiplatform.googleapis.com \
   geocoding-backend.googleapis.com \
   routes.googleapis.com \
+  maps-backend.googleapis.com \
+  places.googleapis.com \
+  apikeys.googleapis.com \
   --project "${PROJECT_ID}"
 
 if ! gcloud iam service-accounts describe "${RUNTIME_SA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
@@ -107,5 +110,16 @@ gcloud iam service-accounts add-iam-policy-binding "${TASK_CALLER_SA}" \
 
 # The binding can be established before the service exists and is harmless on rerun.
 gcloud run services add-iam-policy-binding "${SERVICE_NAME}" --project "${PROJECT_ID}" --region "${REGION}" --member "serviceAccount:${TASK_CALLER_SA}" --role roles/run.invoker >/dev/null 2>&1 || true
+
+# Browser Maps key: shipped to every visitor, so it is limited to this
+# service's URL (plus local development) and to the three browser Maps APIs.
+MAPS_BROWSER_KEY_NAME="${MAPS_BROWSER_KEY_NAME:-Pantry Relay browser maps}"
+if [[ -z "$(gcloud services api-keys list --project "${PROJECT_ID}" --filter="displayName='${MAPS_BROWSER_KEY_NAME}'" --format='value(name)' --limit=1)" ]]; then
+  gcloud services api-keys create --project "${PROJECT_ID}" --display-name="${MAPS_BROWSER_KEY_NAME}" \
+    --allowed-referrers="https://${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app/*,http://localhost:8000/*,http://127.0.0.1:8000/*" \
+    --api-target=service=maps-backend.googleapis.com \
+    --api-target=service=places.googleapis.com \
+    --api-target=service=geocoding-backend.googleapis.com >/dev/null
+fi
 
 echo "Cloud foundation ready: Firestore (default), queue ${QUEUE_NAME}, bucket gs://${PHOTO_BUCKET}"

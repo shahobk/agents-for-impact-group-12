@@ -126,6 +126,7 @@
           <section class="pickup-panel" aria-labelledby="pickup-title">
             <h2 id="pickup-title">Pickup</h2>
             <div class="address-row"><div id="pickup-address-slot" class="address-slot"><input id="pickup-address" aria-label="Pickup address" autocomplete="street-address" placeholder="Store address" /></div><button class="button secondary" id="use-location" type="button">Use my location</button></div>
+            <p id="pickup-current" class="pickup-current" aria-live="polite"></p>
             <div id="pickup-map" class="pickup-map"></div>
             <p id="pickup-note" class="pickup-note">Only the recipient who claims the food sees the exact spot.</p>
           </section>
@@ -414,6 +415,8 @@
     if (!container) return;
     const input = workspace.querySelector("#pickup-address");
     if (input && state.offerLocation?.address && !input.value) input.value = state.offerLocation.address;
+    const current = workspace.querySelector("#pickup-current");
+    if (current) current.textContent = state.offerLocation ? `📍 ${state.offerLocation.address || "Pin placed on the map"}` : "Search for the store, use your location, or tap the map.";
     const note = workspace.querySelector("#pickup-note");
     if (note) note.textContent = state.offerLocation?.saved ? "Using your saved pickup spot. Only the recipient who claims the food sees it." : "Only the recipient who claims the food sees the exact spot.";
     const maps = await loadGoogleMaps();

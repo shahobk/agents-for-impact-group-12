@@ -116,6 +116,7 @@ main { min-height: 68vh; padding-bottom: 50px; outline: 0; }
 .question-input input { flex: 1; padding: 9px 11px; border: 1px solid #cbc8bf; border-radius: 9px; }
 .address-slot input, .address-slot gmp-place-autocomplete { width: 100%; }
 .address-slot input { padding: 10px 12px; color: var(--ink); background: white; border: 1px solid #cbc8bf; border-radius: 9px; }
+.pickup-current { margin: 8px 0 0; font-size: .8rem; font-weight: 700; }
 .pickup-map { height: 230px; margin-top: 10px; overflow: hidden; border-radius: 12px; }
 .pickup-map .pin-map { height: 100%; border-radius: 0; }
 .pickup-note { margin: 8px 0 0; color: var(--muted); font-size: .68rem; }
@@ -133,7 +134,7 @@ main { min-height: 68vh; padding-bottom: 50px; outline: 0; }
 .pin-map .road, .pin-map .city-label { pointer-events: none; }
 .reviewed-pin { position: absolute; z-index: 5; width: 24px; height: 24px; background: var(--lime); border: 4px solid var(--ink); border-radius: 50% 50% 50% 3px; box-shadow: 0 0 0 2px white; transform: translate(-50%, -75%) rotate(-45deg); pointer-events: none; }
 .pin-instruction { position: absolute; z-index: 4; right: 10px; bottom: 10px; padding: 6px 9px; color: var(--ink); background: rgb(255 253 248 / 90%); border-radius: 7px; font-size: .64rem; font-weight: 780; pointer-events: none; }
-.address-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.address-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .address-row .button { white-space: nowrap; }
 
 .panel { padding: clamp(22px, 3vw, 36px); background: rgb(255 253 248 / 94%); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }

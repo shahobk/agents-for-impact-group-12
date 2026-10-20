@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta, timezone
 import base64
@@ -314,9 +315,11 @@ class IntakeInterpreter:
         photo_provider: PhotoProvider | None = None,
         text_provider: TextProvider | None = None,
         max_photo_bytes: int = 5 * 1024 * 1024,
+        provider_timeout_seconds: float = 15.0,
     ) -> None:
         self.photo_provider = photo_provider
         self.text_provider = text_provider
+        self.provider_timeout_seconds = provider_timeout_seconds
         self.max_photo_bytes = max_photo_bytes
 
     async def extract(
@@ -353,7 +356,9 @@ class IntakeInterpreter:
             if self.text_provider is None or not combined:
                 return fallback
             try:
-                provider_value = await self.text_provider(combined, at)
+                provider_value = await asyncio.wait_for(
+                    self.text_provider(combined, at), self.provider_timeout_seconds
+                )
                 return _provider_result(provider_value, combined, at, [])
             except Exception:
                 fallback["warnings"].insert(
@@ -369,7 +374,10 @@ class IntakeInterpreter:
             return fallback
 
         try:
-            provider_value = await self.photo_provider(data, photo_mime_type or "", combined)
+            provider_value = await asyncio.wait_for(
+                self.photo_provider(data, photo_mime_type or "", combined),
+                self.provider_timeout_seconds,
+            )
             return _provider_result(
                 provider_value,
                 combined,

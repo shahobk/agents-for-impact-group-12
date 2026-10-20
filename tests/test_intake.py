@@ -195,3 +195,17 @@ def test_deterministic_fallback_reads_clock_deadline_in_atlanta_time_and_asks_th
         "In 4 hours",
         "By 8 pm today",
     ]
+
+
+def test_slow_language_model_times_out_to_deterministic_reading():
+    async def text_provider(text, now):
+        await asyncio.sleep(5)
+
+    result = asyncio.run(
+        IntakeInterpreter(text_provider=text_provider, provider_timeout_seconds=0.01).extract(
+            text="ten crates of refrigerated spinach", now=NOW
+        )
+    )
+
+    assert result["provider"] == "deterministic_fallback"
+    assert result["draft"]["storage_state"] == "refrigerated"
