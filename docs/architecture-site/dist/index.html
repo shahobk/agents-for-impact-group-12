@@ -21,7 +21,7 @@
       </a>
       <div class="header-actions">
         <span class="review-badge">Hackathon review</span>
-        <a href="../../../frontend/index.html">Open product demo <span aria-hidden="true">↗</span></a>
+        <a href="https://atlanta-grocery-rescue-dmyvsl27jq-uc.a.run.app/">Open product demo <span aria-hidden="true">↗</span></a>
       </div>
     </header>
 
@@ -30,12 +30,12 @@
         <div class="orientation-copy">
           <p class="eyebrow">Atlanta grocery rescue broker</p>
           <h1 id="page-title">Architecture, from conversation to safe handoff.</h1>
-          <p>Pantry Relay now starts with a review-first AI intake, then passes confirmed facts through agent-orchestrated matching and transactional workflow controls. Explore what happens, who decides, and where state lives.</p>
+          <p>Pantry Relay uses review-first AI for donor offers and recipient pickup replies, then passes confirmed facts through agent-orchestrated matching and transactional workflow controls. Coordinators can inspect the live queue and ask the same root agent for evidence-backed guidance.</p>
         </div>
         <aside class="principle" aria-label="Core design principle">
           <span>Core boundary</span>
           <strong>AI proposes. People confirm.<br />Code authorizes.</strong>
-          <p>Inferred offer facts stay editable; eligibility, capacity, claims, and state transitions remain deterministic.</p>
+          <p>Inferred offer and pickup facts stay editable; eligibility, capacity, claims, and state transitions remain deterministic.</p>
         </aside>
       </section>
 
@@ -105,7 +105,7 @@
           <h2 id="takeaway-title">Conversational at the edge.<br />Strict at the center.</h2>
         </div>
         <div class="takeaway-points">
-          <p><span>01</span><strong>Review-first intake</strong>Gemini suggests structured facts; the donor edits and confirms them.</p>
+          <p><span>01</span><strong>Review-first interaction</strong>Gemini suggests offer and pickup facts; donors and recipients edit and confirm them.</p>
           <p><span>02</span><strong>Explainable eligibility</strong>BigQuery finds candidates; deterministic rules decide who qualifies.</p>
           <p><span>03</span><strong>Transactional handoff</strong>Firestore-backed commands make claims atomic and retries harmless.</p>
         </div>
