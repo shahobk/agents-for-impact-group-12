@@ -43,6 +43,9 @@
     commandKeys: new Map(),
     equityAudit: null,
     coordinatorSession: "idle",
+    recipientLoadSeq: 0,
+    recipientDrawnSeq: 0,
+    recipientActed: 0,
   };
 
   captureFragmentToken();
@@ -738,12 +741,46 @@
     hydrateMaps();
   }
 
-  function statusPatch(root, region, html) {
+  function statusPatch(root, region, html, afterSwap) {
     const element = root.querySelector(`[data-region="${region}"]`);
     if (!element || statusRegionHtml.get(element) === html) return false;
     statusRegionHtml.set(element, html);
-    element.innerHTML = html;
+    swapKeepingInput(element, html, afterSwap);
     return true;
+  }
+
+  // Replace a region's markup without taking anything away from the person
+  // using it: typed text, ticked boxes, open <details>, focus and caret carry
+  // over to the element with the same id in the new markup. `afterSwap` runs
+  // before restoring, so parts it renders (e.g. an open chip editor) get their
+  // typed text back too.
+  function swapKeepingInput(element, html, afterSwap) {
+    const kept = [...element.querySelectorAll("input[id], textarea[id], details[id]")].map((node) => {
+      if (node.tagName === "DETAILS") return { id: node.id, open: node.open };
+      if (node.type === "checkbox" || node.type === "radio") return node.checked === node.defaultChecked ? null : { id: node.id, checked: node.checked };
+      return node.value === node.defaultValue ? null : { id: node.id, value: node.value };
+    }).filter(Boolean);
+    const active = document.activeElement;
+    const focus = active && active.id && element.contains(active) ? { id: active.id, start: caret(active, "selectionStart"), end: caret(active, "selectionEnd") } : null;
+    element.innerHTML = html;
+    if (afterSwap) afterSwap();
+    const find = (id) => element.querySelector(`#${CSS.escape(id)}`);
+    kept.forEach((item) => {
+      const node = find(item.id);
+      if (!node) return;
+      if ("open" in item) node.open = item.open;
+      else if ("checked" in item) node.checked = item.checked;
+      else node.value = item.value;
+    });
+    const target = focus && find(focus.id);
+    if (target && (document.activeElement === document.body || !document.activeElement)) {
+      target.focus({ preventScroll: true });
+      if (focus.start != null) try { target.setSelectionRange(focus.start, focus.end); } catch (_err) { /* not a text field */ }
+    }
+  }
+
+  function caret(node, key) {
+    try { return node[key]; } catch (_err) { return null; }
   }
 
   // One plain sentence answering "what's happening with my food right now?",
@@ -910,24 +947,56 @@
   function renderRecipient() {
     if (!state.token) return renderMissingContext("recipient");
     state.handoff = null;
-    state.recipientView = "";
     state.recipientStage = "";
+    state.recipientDeclineOpen = false;
     workspace.innerHTML = loadingView("Loading your offers…");
     loadRecipient();
   }
 
+  // Polls, post-action reloads, and the hold timer all call this, so several
+  // reads can be in flight. A read may not draw if a newer read already drew,
+  // or if an action succeeded after it was sent: that older answer would
+  // briefly bring back the previous step (e.g. the "take it" button right
+  // after taking it). Failed actions change nothing, so they never discard.
+  function recipientStale(seq, acted) {
+    return state.role !== "recipient" || seq < state.recipientDrawnSeq || acted !== state.recipientActed;
+  }
+
   async function loadRecipient() {
+    const seq = ++state.recipientLoadSeq;
+    const acted = state.recipientActed;
     try {
-      state.data = await api("/api/recipients/notifications");
-      if (state.role !== "recipient") return;
+      const data = await api("/api/recipients/notifications");
+      if (recipientStale(seq, acted)) return;
+      state.recipientDrawnSeq = seq;
+      state.data = data;
       const notices = arrayOf(state.data.notifications);
       if (!notices.some((item) => recipientOfferId(item) === state.selectedOfferId)) state.selectedOfferId = notices[0] ? recipientOfferId(notices[0]) : "";
       drawRecipient();
       if (!notices.length || notices.some((item) => !TERMINAL.has(item.offer?.status || item.status))) startPolling(loadRecipient);
     } catch (err) {
+      if (recipientStale(seq, acted)) return;
       if (isAuthError(err)) return recoverMissingContext("recipient");
+      // A blip while the card is up: keep everything on screen and try again.
+      if (workspace.querySelector(".recipient-inbox")) return startPolling(loadRecipient);
       renderLoadError("Could not load this recipient inbox", err, () => clearToken("recipient"));
     }
+  }
+
+  // Show what an action did right away (the server already said so), then
+  // re-read the inbox. Without this the old button sat there, enabled, until
+  // the reload came back, and a second tap failed with "no longer valid".
+  function recipientApply(offerId, result) {
+    state.recipientActed += 1;
+    const item = arrayOf(state.data?.notifications).find((notice) => recipientOfferId(notice) === offerId);
+    if (item && result) {
+      const response = { reserved: "holding", confirmed: "won", completed: "won" }[result.status];
+      if (result.response || response) item.response = result.response || response;
+      if (result.status) item.offer = { ...item.offer, status: result.status };
+      if (result.reservation) item.reservation = result.reservation;
+      drawRecipient();
+    }
+    loadRecipient();
   }
 
   function recipientOfferId(item) { return item?.offer_id || item?.offer?.offer_id || ""; }
@@ -938,8 +1007,7 @@
   }
 
   function recipientReservation(item) {
-    if (item.reservation) return item.reservation;
-    return state.reservation?.offer_id === recipientOfferId(item) ? state.reservation : null;
+    return item.reservation || null;
   }
 
   function recipientStage(item) {
@@ -958,28 +1026,32 @@
     const current = recipientCurrent();
     const stage = current ? recipientStage(current) : "empty";
     const reservation = current ? recipientReservation(current) : null;
-    // Polling redraws every few seconds; only rebuild when something visible
-    // changed, so a half-typed reply, open editor, or note is never wiped.
-    const signature = JSON.stringify([notices.map((item) => [recipientOfferId(item), item.response, item.offer?.status]), state.selectedOfferId, stage, reservation?.reservation_id, reservation?.status, Boolean(current?.offer?.donor_location)]);
-    if (signature === state.recipientView && workspace.querySelector(".recipient-inbox")) return;
     const stageKey = `${state.selectedOfferId}:${stage}`;
     const moved = Boolean(state.recipientStage) && state.recipientStage !== stageKey;
-    state.recipientView = signature;
+    if (state.recipientStage !== stageKey) state.recipientDeclineOpen = false;
     state.recipientStage = stageKey;
     if (stage === "holding" && (!state.handoff || state.handoff.reservationId !== reservation.reservation_id)) state.handoff = recipientFreshReply(current, reservation);
+    // Polling redraws every few seconds. The inbox is built once; after that
+    // only regions whose markup changed are swapped, and the swap keeps typed
+    // text, open editors/notes, and focus. An unchanged card is never touched,
+    // so its countdown and in-progress reply keep running.
+    let root = workspace.querySelector(".recipient-inbox");
+    if (!root) {
+      workspace.innerHTML = `<div class="recipient-inbox"><div data-region="hello"></div><div data-region="list"></div><div data-region="card"></div></div>`;
+      root = workspace.querySelector(".recipient-inbox");
+      root.addEventListener("click", (event) => {
+        const pick = event.target.closest("[data-pick-offer]");
+        if (!pick) return;
+        state.selectedOfferId = pick.dataset.pickOffer;
+        drawRecipient();
+      });
+    }
     const name = state.data.recipient?.name;
-    workspace.innerHTML = `<div class="recipient-inbox">
-      ${name ? `<p class="recipient-hello">For ${e(name)}</p>` : ""}
-      ${notices.length > 1 ? recipientList(notices) : ""}
-      ${current ? recipientCard(current, stage) : `<article class="recipient-card">${emptyState("No offers right now", "When food that fits your pantry comes up, it shows here.")}</article>`}
-    </div>`;
-    workspace.querySelectorAll("[data-pick-offer]").forEach((button) => button.addEventListener("click", () => {
-      state.selectedOfferId = button.dataset.pickOffer;
-      drawRecipient();
-    }));
-    if (current) bindRecipientActions(current, stage);
-    hydrateMaps();
-    if (moved) workspace.querySelector("#recipient-heading")?.focus();
+    statusPatch(root, "hello", name ? `<p class="recipient-hello">For ${e(name)}</p>` : "");
+    statusPatch(root, "list", notices.length > 1 ? recipientList(notices) : "");
+    const card = current ? recipientCard(current, stage) : `<article class="recipient-card">${emptyState("No offers right now", "When food that fits your pantry comes up, it shows here.")}</article>`;
+    if (statusPatch(root, "card", card, () => { if (current) bindRecipientActions(current, stage); })) hydrateMaps();
+    if (moved) root.querySelector("#recipient-heading")?.focus();
   }
 
   function recipientList(notices) {
@@ -996,7 +1068,7 @@
     const mapTitle = offer.donor_location ? "Pickup spot" : "Exact pickup spot shared once you say yes";
     const map = ["done", "closed", "waiting"].includes(stage) ? "" : `<div class="recipient-map">${workflowMap(offer.map, mapTitle)}</div>`;
     const body = { offer: recipientOfferStep, holding: recipientHoldStep, confirmed: recipientConfirmedStep, done: recipientDoneStep }[stage] || recipientClosedStep;
-    return `<article class="recipient-card" data-stage="${e(stage)}" aria-labelledby="recipient-heading"><div class="recipient-main">${body(item)}</div>${map}</article>`;
+    return `<article class="recipient-card" data-stage="${e(stage)}" data-offer-id="${e(recipientOfferId(item))}" aria-labelledby="recipient-heading"><div class="recipient-main">${body(item)}</div>${map}</article>`;
   }
 
   function recipientOfferStep(item) {
@@ -1048,7 +1120,7 @@
         ${directions ? `<a class="button secondary" href="${e(directions)}" target="_blank" rel="noopener noreferrer">Directions <span aria-hidden="true">↗</span></a>` : ""}
       </div>
       <form id="complete-form" class="recipient-complete" data-offer-id="${e(recipientOfferId(item))}">
-        <details class="recipient-note"><summary>Add a note</summary>
+        <details id="recipient-note" class="recipient-note"><summary>Add a note</summary>
           <div class="recipient-note-fields"><label for="actual-quantity">How much did you get? (pallets, optional)</label><input id="actual-quantity" name="actual_quantity_pallets" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="${e(formatNumber(offer.quantity_pallets))}" />
           <label for="completion-note">Note (optional)</label><input id="completion-note" name="note" maxlength="1000" placeholder="e.g. 2 crates were damaged" /></div>
         </details>
@@ -1122,13 +1194,16 @@
     } catch (_err) { return { contact_name: "", contact_phone: "" }; }
   }
 
+  function recipientReplyKey(reservationId) { return `pantry-relay:handoff:${reservationId}`; }
+
   function recipientFreshReply(item, reservation) {
     const saved = readRecipientContact();
     const draft = { contact_name: saved.contact_name || null, contact_phone: saved.contact_phone || null, expected_handoff_time: null };
-    return {
+    const reply = {
       reservationId: reservation.reservation_id,
       offerId: recipientOfferId(item),
       deadline: item.offer?.deadline || item.deadline || "",
+      input: "",
       text: "",
       draft,
       confidence: {},
@@ -1140,31 +1215,77 @@
       seq: 0,
       parsed: false,
     };
+    // A reload during the hold brings back what was already typed and picked.
+    const kept = readSessionJson(recipientReplyKey(reservation.reservation_id), null);
+    if (kept && typeof kept === "object") {
+      reply.input = typeof kept.input === "string" ? kept.input : "";
+      reply.text = typeof kept.text === "string" ? kept.text : "";
+      RECIPIENT_FIELDS.forEach((field) => { if (hasValue(kept.draft?.[field])) reply.draft[field] = String(kept.draft[field]); });
+      reply.confidence = kept.confidence && typeof kept.confidence === "object" ? kept.confidence : {};
+      ["saved", "edited", "answered"].forEach((key) => { reply[key] = new Set(arrayOf(kept[key]).filter((field) => RECIPIENT_FIELDS.includes(field))); });
+      reply.questions = arrayOf(kept.questions);
+      reply.parsed = Boolean(kept.parsed);
+      reply.resumed = true;
+    }
+    return reply;
+  }
+
+  function recipientKeepReply() {
+    const reply = state.handoff;
+    if (!reply) return;
+    const { input, text, draft, confidence, questions, parsed } = reply;
+    try {
+      sessionStorage.setItem(recipientReplyKey(reply.reservationId), JSON.stringify({ input, text, draft, confidence, questions, parsed, saved: [...reply.saved], edited: [...reply.edited], answered: [...reply.answered] }));
+    } catch (_err) { /* storage is optional */ }
+  }
+
+  const RECIPIENT_ERRORS = {
+    offer_currently_held: "Another pantry just put a hold on this. If they let it go, it comes back to you.",
+    candidate_response_closed: "This offer isn't open to you any more.",
+    candidate_not_eligible: "This offer has moved on to other pantries.",
+    offer_not_claimable: "This offer just closed.",
+    capacity_unavailable: "Your pantry's space is already promised to another offer.",
+    reservation_expired: "The hold ran out before your confirmation arrived.",
+    invalid_handoff_time: "That pickup time no longer works. Pick a time before the food has to be gone.",
+  };
+
+  // Turn workflow error codes into plain words, then re-read the inbox so the
+  // card shows where things actually stand.
+  function recipientActionFailed(offerId, err) {
+    const code = err.detail?.code;
+    if (isAuthError(err) && !RECIPIENT_ERRORS[code]) return recoverMissingContext("recipient");
+    showToast(RECIPIENT_ERRORS[code] || errorMessage(err), code !== "offer_currently_held");
+    // Lost the race: say so on the card now instead of leaving "take it" up.
+    if (code === "offer_currently_held") return recipientApply(offerId, { status: "reserved", response: "pending" });
+    loadRecipient();
   }
 
   function bindRecipientActions(current, stage) {
     const offerId = recipientOfferId(current);
     const claim = workspace.querySelector("[data-action=claim]");
-    claim?.addEventListener("click", async () => {
-      const result = await mutateButton(claim, `/api/offers/${encodeURIComponent(offerId)}/claim`, {}, (held) => {
-        state.reservation = held.reservation;
-        loadRecipient();
-      });
-      if (!result) loadRecipient();
-    });
     const declineOpen = workspace.querySelector("[data-action=decline-open]");
+    claim?.addEventListener("click", async () => {
+      if (declineOpen) declineOpen.disabled = true;
+      await mutateButton(claim, `/api/offers/${encodeURIComponent(offerId)}/claim`, {}, (held) => recipientApply(offerId, held), (err) => recipientActionFailed(offerId, err));
+      if (declineOpen?.isConnected) declineOpen.disabled = false;
+    });
+    const reasons = workspace.querySelector("#decline-reasons");
+    if (reasons && declineOpen) {
+      reasons.hidden = !state.recipientDeclineOpen;
+      declineOpen.setAttribute("aria-expanded", String(state.recipientDeclineOpen));
+    }
     declineOpen?.addEventListener("click", () => {
-      const reasons = workspace.querySelector("#decline-reasons");
-      reasons.hidden = !reasons.hidden;
-      declineOpen.setAttribute("aria-expanded", String(!reasons.hidden));
-      if (!reasons.hidden) reasons.querySelector(".option")?.focus();
+      state.recipientDeclineOpen = reasons.hidden;
+      reasons.hidden = !state.recipientDeclineOpen;
+      declineOpen.setAttribute("aria-expanded", String(state.recipientDeclineOpen));
+      if (state.recipientDeclineOpen) reasons.querySelector(".option")?.focus();
     });
     workspace.querySelectorAll("[data-decline]").forEach((button) => button.addEventListener("click", () => {
-      workspace.querySelectorAll("[data-decline]").forEach((other) => { if (other !== button) other.disabled = true; });
-      mutateButton(button, `/api/offers/${encodeURIComponent(offerId)}/decline`, { reason: button.dataset.decline }, () => {
+      workspace.querySelectorAll("[data-decline], [data-action=claim]").forEach((other) => { if (other !== button) other.disabled = true; });
+      mutateButton(button, `/api/offers/${encodeURIComponent(offerId)}/decline`, { reason: button.dataset.decline }, (result) => {
         showToast("Got it. We'll offer it to the next pantry.");
-        loadRecipient();
-      }).finally(() => workspace.querySelectorAll("[data-decline]").forEach((other) => { other.disabled = false; }));
+        recipientApply(offerId, { ...result, response: "declined" });
+      }, (err) => recipientActionFailed(offerId, err)).finally(() => workspace.querySelectorAll("[data-decline], [data-action=claim]").forEach((other) => { other.disabled = false; }));
     }));
     if (stage === "holding") bindRecipientReply();
     workspace.querySelector("#complete-form")?.addEventListener("submit", (event) => {
@@ -1174,15 +1295,17 @@
       const quantity = String(data.get("actual_quantity_pallets") || "").trim();
       const payload = { note: String(data.get("note") || "").trim() };
       if (quantity !== "") payload.actual_quantity_pallets = Number(quantity);
-      mutateButton(form.querySelector("[type=submit]"), `/api/offers/${encodeURIComponent(form.dataset.offerId)}/complete`, payload, () => { showToast("Marked as picked up. Thank you!"); loadRecipient(); });
+      mutateButton(form.querySelector("[type=submit]"), `/api/offers/${encodeURIComponent(form.dataset.offerId)}/complete`, payload, (result) => { showToast("Marked as picked up. Thank you!"); recipientApply(form.dataset.offerId, result); }, (err) => recipientActionFailed(form.dataset.offerId, err));
     });
   }
 
   function bindRecipientReply() {
     const reply = state.handoff;
     const input = workspace.querySelector("#handoff-text");
-    input.value = reply.text;
+    if (input.value !== reply.input) input.value = reply.input;
     input.addEventListener("input", () => {
+      reply.input = input.value;
+      recipientKeepReply();
       window.clearTimeout(state.parseTimer);
       state.parseTimer = window.setTimeout(recipientParse, 900);
     });
@@ -1194,12 +1317,24 @@
     panel.addEventListener("click", onRecipientReplyClick);
     panel.addEventListener("submit", onRecipientReplySubmit);
     panel.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && state.handoff.editing) { state.handoff.editing = ""; recipientRenderReply(); }
+      if (event.key === "Escape" && state.handoff.editing) recipientCloseEditor();
     });
     workspace.querySelector("#confirm-pickup").addEventListener("click", recipientConfirm);
     if (reply.saved.size && !reply.parsed) recipientParseState("Saved from last time. Add when you'll arrive, or type to change anything.", "done");
     recipientRenderReply();
     recipientCountdown();
+    // Typed before a reload but never read: read it now.
+    if (reply.resumed) {
+      reply.resumed = false;
+      if (reply.input.trim() && reply.input.trim() !== reply.text) recipientParse();
+    }
+  }
+
+  function recipientCloseEditor() {
+    const field = state.handoff.editing;
+    state.handoff.editing = "";
+    recipientRenderReply();
+    workspace.querySelector(`#handoff-result [data-edit="${field}"]`)?.focus();
   }
 
   async function recipientParse() {
@@ -1291,8 +1426,10 @@
     // Until there is something to build on, the reply box is the only ask.
     const started = reply.parsed || RECIPIENT_FIELDS.some((field) => hasValue(reply.draft[field]));
     const questions = started ? RECIPIENT_FIELDS.filter(recipientNeedsAnswer).map((field) => recipientQuestion(recipientQuestionFor(field))).join("") : "";
-    panel.innerHTML = `${chips ? `<div class="chip-row">${chips}</div>` : ""}${questions}`;
-    panel.querySelector(".chip.editing [name=value]")?.focus();
+    // A reading can land while someone is typing in a chip editor or a
+    // question; keep what they typed and where their cursor is.
+    swapKeepingInput(panel, `${chips ? `<div class="chip-row">${chips}</div>` : ""}${questions}`);
+    recipientKeepReply();
     recipientUpdateConfirm();
   }
 
@@ -1342,6 +1479,9 @@
     if (edit) {
       reply.editing = edit.dataset.edit;
       recipientRenderReply();
+      const editor = workspace.querySelector("#handoff-result .chip.editing [name=value]");
+      editor?.focus();
+      if (editor?.type !== "datetime-local") editor?.setSelectionRange(editor.value.length, editor.value.length);
     }
   }
 
@@ -1355,8 +1495,9 @@
     reply.draft[field] = field === "expected_handoff_time" ? new Date(raw).toISOString() : raw;
     reply.edited.add(field);
     reply.saved.delete(field);
-    reply.editing = "";
+    if (form.dataset.field) return recipientCloseEditor();
     recipientRenderReply();
+    workspace.querySelector("#confirm-pickup:not(:disabled)")?.focus();
   }
 
   function recipientMissing() {
@@ -1390,12 +1531,15 @@
       contact_name: String(reply.draft.contact_name).trim(),
       contact_phone: String(reply.draft.contact_phone).trim(),
     };
-    const result = await mutateButton(button, `/api/reservations/${encodeURIComponent(button.dataset.reservationId)}/confirm`, payload, () => {
-      try { localStorage.setItem(RECIPIENT_CONTACT_KEY, JSON.stringify({ contact_name: payload.contact_name, contact_phone: payload.contact_phone })); } catch (_err) { /* storage is optional */ }
+    await mutateButton(button, `/api/reservations/${encodeURIComponent(button.dataset.reservationId)}/confirm`, payload, (result) => {
+      try {
+        localStorage.setItem(RECIPIENT_CONTACT_KEY, JSON.stringify({ contact_name: payload.contact_name, contact_phone: payload.contact_phone }));
+        sessionStorage.removeItem(recipientReplyKey(reply.reservationId));
+      } catch (_err) { /* storage is optional */ }
       showToast("Pickup confirmed. The donor has your details.");
-      loadRecipient();
-    });
-    if (!result) { recipientUpdateConfirm(); loadRecipient(); }
+      recipientApply(reply.offerId, result);
+    }, (err) => recipientActionFailed(reply.offerId, err));
+    if (button.isConnected) recipientUpdateConfirm();
   }
 
   function recipientCountdown() {
@@ -2276,14 +2420,15 @@
     state.countdownTimer = window.setInterval(update, 1000);
   }
 
-  async function mutateButton(button, path, body, onSuccess) {
+  async function mutateButton(button, path, body, onSuccess, onError) {
     setBusy(button, true, "Working…");
     try {
       const result = await api(path, { method: "POST", body, mutation: true });
       onSuccess(result);
       return result;
     } catch (err) {
-      showToast(errorMessage(err), true);
+      if (onError) onError(err);
+      else showToast(errorMessage(err), true);
       return null;
     } finally {
       setBusy(button, false);
