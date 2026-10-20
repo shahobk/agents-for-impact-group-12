@@ -123,3 +123,75 @@ def test_gemini_provider_output_is_allowlisted_and_requires_review():
     assert result["retained"] is False
     assert "donor_latitude" not in result["draft"]
 
+
+
+def test_text_goes_to_language_model_first_and_low_confidence_fields_get_questions():
+    seen = {}
+
+    async def text_provider(text, now):
+        seen["text"] = text
+        seen["now"] = now
+        return {
+            "draft": {
+                "description": "Yogurt cups, 40 cases",
+                "quantity_original": "40 cases",
+                "quantity_pallets": 1,
+                "storage_state": "refrigerated",
+                "pickup_deadline": "2026-10-21T01:00:00Z",
+                "transport_mode": None,
+            },
+            "confidence": {"quantity_pallets": "low", "storage_state": "high"},
+            "warnings": [],
+        }
+
+    result = asyncio.run(
+        IntakeInterpreter(text_provider=text_provider).extract(
+            text="about 40 cases of yogurt, gotta go before we close at 9", now=NOW
+        )
+    )
+
+    assert seen == {"text": "about 40 cases of yogurt, gotta go before we close at 9", "now": NOW}
+    assert result["provider"] == "gemini"
+    assert result["draft"]["quantity_original"] == "40 cases"
+    assert result["confidence"]["quantity_pallets"] == "low"
+    assert result["confidence"]["storage_state"] == "high"
+    assert [question["field"] for question in result["questions"]] == [
+        "quantity_pallets",
+        "transport_mode",
+    ]
+    pallets = result["questions"][0]
+    assert pallets["prompt"] == "Roughly how many pallets is 40 cases?"
+    assert all({"label", "value"} <= option.keys() for option in pallets["options"])
+
+
+def test_text_model_failure_falls_back_to_deterministic_reading():
+    async def text_provider(text, now):
+        raise RuntimeError("model unavailable")
+
+    result = asyncio.run(
+        IntakeInterpreter(text_provider=text_provider).extract(
+            text="ten crates of refrigerated spinach within six hours for pickup", now=NOW
+        )
+    )
+
+    assert result["provider"] == "deterministic_fallback"
+    assert "intake assistant was unavailable" in result["warnings"][0]
+    assert result["draft"]["storage_state"] == "refrigerated"
+
+
+def test_deterministic_fallback_reads_clock_deadline_in_atlanta_time_and_asks_the_rest():
+    # 16:00 UTC is noon in Atlanta (EDT), so "by 8 pm" is 00:00 UTC next day.
+    result = deterministic_interpret("some bread, must be gone by 8 pm", now=NOW)
+
+    assert result["draft"]["pickup_deadline"] == "2026-10-21T00:00:00+00:00"
+    asked = [question["field"] for question in result["questions"]]
+    assert asked == ["quantity_original", "quantity_pallets", "storage_state", "transport_mode"]
+    deadline_question = asyncio.run(
+        IntakeInterpreter().extract(text="some bread", now=NOW)
+    )["questions"][3]
+    assert deadline_question["field"] == "pickup_deadline"
+    assert [option["label"] for option in deadline_question["options"]] == [
+        "In 2 hours",
+        "In 4 hours",
+        "By 8 pm today",
+    ]

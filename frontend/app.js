@@ -10,6 +10,16 @@
     confirmed: "Confirmed", completed: "Completed", needs_transport: "Needs transport",
     no_match: "No match", failed: "Failed", expired: "Expired", cancelled: "Cancelled",
   };
+  const DRAFT_FIELDS = ["description", "quantity_original", "quantity_pallets", "storage_state", "pickup_deadline", "transport_mode"];
+  const REQUIRED_FIELDS = ["description", "quantity_pallets", "storage_state", "pickup_deadline", "transport_mode"];
+  const FIELD_LABELS = { description: "Food", quantity_original: "Amount", quantity_pallets: "Size", storage_state: "Storage", pickup_deadline: "Gone by", transport_mode: "Transport" };
+  const MISSING_LABELS = { description: "what the food is", quantity_pallets: "size", storage_state: "storage", pickup_deadline: "when it must go", transport_mode: "transport" };
+  const STORAGE_LABELS = { refrigerated: "Refrigerated", frozen: "Frozen", ambient: "Shelf stable" };
+  const TRANSPORT_CHOICES = { recipient_pickup: "They pick up", donor_delivery: "We deliver (≤ 5 km)", transportation_needed: "Need a driver" };
+  const SPINACH_EXAMPLE = "10 crates of bagged spinach, refrigerated, must move within 6 hours. Recipient picks up.";
+  const DEMO_PICKUP = { latitude: 33.749, longitude: -84.388, source: "corrected_pin", address: "Downtown Atlanta demo grocery" };
+  const SAVED_PICKUP_KEY = "pantry-relay:saved-pickup";
+  const ATLANTA_CENTER = { lat: 33.749, lng: -84.388 };
   const state = {
     role: normalizeRole(new URLSearchParams(location.search).get("role")),
     token: "",
@@ -19,11 +29,15 @@
     selectedOfferId: "",
     reservation: null,
     demoRecipients: readSessionJson("pantry-relay:demo-recipients", []),
-    draftMeta: { inferredFields: [], warnings: [], source: null },
+    intake: null,
+    parseTimer: null,
     offerLocation: null,
     recognition: null,
-    captureMode: "type",
-    publicSummary: null,
+    mapsPromise: null,
+    mapsConfig: null,
+    mapsFailed: false,
+    mapCache: new Map(),
+    pickupMap: null,
     commandKeys: new Map(),
     equityAudit: null,
     coordinatorSession: "idle",
@@ -91,204 +105,224 @@
 
   function renderDonorForm() {
     stopSpeechCapture();
+    state.intake = freshIntake();
+    if (!state.offerLocation) state.offerLocation = readSavedPickup();
     workspace.innerHTML = `
-      <section class="hero demo-hero">
-        <div class="hero-copy">
-          <p class="eyebrow">Atlanta grocery rescue pilot</p>
-          <h1>Ten crates. Six hours. One safe handoff.</h1>
-          <p>Pantry Relay finds likely recipients, rejects unsafe options with deterministic rules, and protects the first qualified acceptance.</p>
-          <div class="hero-actions"><button class="button primary hero-button" id="run-demo" type="button">Run the spinach rescue <span aria-hidden="true">→</span></button><a class="button-link" href="#capture">Create a different offer</a></div>
+      <section class="composer" aria-labelledby="composer-title">
+        <h1 id="composer-title">What food needs a new home?</h1>
+        <p class="composer-lead">Describe it the way you'd tell a colleague. We fill in the details; you check them before anything is sent.</p>
+        <div class="composer-box">
+          <label class="visually-hidden" for="offer-text">Describe the food</label>
+          <textarea id="offer-text" rows="3" placeholder="About 40 cases of yogurt, has to go before we close at 9. They'd need to pick up."></textarea>
+          <div class="composer-tools">
+            <button class="tool-button" id="speak-offer" type="button"><span aria-hidden="true">◉</span> Speak</button>
+            <label class="tool-button" for="photo-offer"><input id="photo-offer" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" /><span aria-hidden="true">▧</span> Photo</label>
+            <span id="parse-state" class="parse-state" role="status" aria-live="polite"></span>
+            <button class="button-link" id="run-demo" type="button">Try the spinach example</button>
+          </div>
         </div>
-        ${landingMap()}
-      </section>
-      <section class="proof-rail" aria-label="How Pantry Relay works">
-        <div><strong>30</strong><span>semantic candidates</span></div><div><strong>≤3</strong><span>notified per wave</span></div><div><strong>10 min</strong><span>protected hold</span></div><div><strong>1</strong><span>shared workflow</span></div>
-      </section>
-      <p class="impact-context"><strong>Impact starts at completion.</strong> Offers and temporary holds are food at risk—not food rescued.</p>
-      <section class="public-impact" aria-label="Demo environment impact"><div><span id="public-completed">—</span><small>completed rescues</small></div><div><span id="public-pallets">—</span><small>completed pallets</small></div><div><span id="public-active">—</span><small>active offers</small></div><p id="public-scope">Authoritative workflow counts for this demo environment; not live recipient operations.</p></section>
-      <section class="panel capture-panel" id="capture" aria-labelledby="capture-title">
-        <div class="section-heading">
-          <div><p class="kicker">Offer intake</p><h2 id="capture-title">Tell us what needs a home</h2><p class="muted">Speak, add a photo, or type. Nothing is submitted until you review every field.</p></div>
+        <div class="composer-result" id="composer-result" hidden>
+          <section class="draft-panel" aria-label="Offer details"><div id="draft-panel"></div></section>
+          <section class="pickup-panel" aria-labelledby="pickup-title">
+            <h2 id="pickup-title">Pickup</h2>
+            <div class="address-row"><div id="pickup-address-slot" class="address-slot"><input id="pickup-address" aria-label="Pickup address" autocomplete="street-address" placeholder="Store address" /></div><button class="button secondary" id="use-location" type="button">Use my location</button></div>
+            <div id="pickup-map" class="pickup-map"></div>
+            <p id="pickup-note" class="pickup-note">Only the recipient who claims the food sees the exact spot.</p>
+          </section>
+          <div class="composer-submit">
+            <p id="submit-hint" class="submit-hint"></p>
+            <button class="button primary" id="submit-offer" type="button">Find a home <span aria-hidden="true">→</span></button>
+            <p id="form-error" class="notice danger" role="alert" hidden></p>
+          </div>
         </div>
-        <div class="capture-methods" role="group" aria-label="Offer capture method"><button class="capture-method active" data-mode="type" type="button"><span aria-hidden="true">Aa</span><strong>Type</strong><small>Describe the food</small></button><button class="capture-method" id="speak-offer" data-mode="speak" type="button"><span aria-hidden="true">◉</span><strong>Speak</strong><small>No audio retained</small></button><label class="capture-method" for="photo-offer"><input id="photo-offer" class="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" /><span aria-hidden="true">▧</span><strong>Photo</strong><small>Take or upload</small></label></div>
-        <div class="field capture-text"><label for="offer-text">Food and quantity</label><textarea id="offer-text" rows="4" placeholder="For example: 10 crates of bagged spinach, refrigerated, must move by 8 p.m."></textarea><small id="capture-help">Include packaging, visible condition, storage, and any label dates. Pantry Relay never infers food safety.</small></div>
-        <div id="capture-status" class="capture-status" role="status" aria-live="polite"></div>
-        <button class="button primary wide" id="review-offer" type="button">Create editable draft <span aria-hidden="true">→</span></button>
       </section>`;
+    const input = workspace.querySelector("#offer-text");
+    input.addEventListener("input", () => scheduleParse());
+    input.addEventListener("blur", () => parseOffer());
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); parseOffer(); }
+    });
     workspace.querySelector("#run-demo").addEventListener("click", loadDemo);
-    workspace.querySelector("#review-offer").addEventListener("click", interpretOfferText);
     workspace.querySelector("#speak-offer").addEventListener("click", startSpeechCapture);
     workspace.querySelector("#photo-offer").addEventListener("change", analyzeOfferPhoto);
-    workspace.querySelector("[data-mode=type]").addEventListener("click", () => {
-      state.captureMode = "type";
-      workspace.querySelector("#offer-text").focus();
+    workspace.querySelector("#use-location").addEventListener("click", useLocation);
+    workspace.querySelector("#pickup-address").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); findAddress(); }
     });
-    loadPublicSummary();
+    workspace.querySelector("#submit-offer").addEventListener("click", submitOffer);
+    const panel = workspace.querySelector("#draft-panel");
+    panel.addEventListener("click", onDraftClick);
+    panel.addEventListener("submit", onDraftSubmit);
+    panel.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && state.intake.editing) { state.intake.editing = ""; renderDraft(); }
+    });
+    input.focus();
   }
 
-  function radio(name, value, label, checked = false, help = "") {
-    return `<label class="choice"><input type="radio" name="${name}" value="${value}" required ${checked ? "checked" : ""}/><span><strong>${label}</strong>${help ? `<small>${help}</small>` : ""}</span></label>`;
+  function freshIntake() {
+    return { text: "", draft: {}, confidence: {}, questions: [], edited: new Set(), answered: new Set(), editing: "", seq: 0, photoUsed: false };
   }
 
-  function landingMap(review = false) {
-    return `<div class="city-map-card ${review ? "review-map" : ""}" aria-label="Illustrative Atlanta recipient coverage map"><div class="map-topline"><span>Atlanta rescue coverage</span><span class="map-live"><i></i> Demo network</span></div><div class="city-map" aria-hidden="true"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span><span class="coverage-ring"></span><span class="map-dot donor"></span><span class="map-dot recipient one"></span><span class="map-dot recipient two"></span><span class="map-dot recipient three"></span></div><div class="map-legend"><span><i class="legend-donor"></i>Generated demo anchor</span><span><i class="legend-recipient"></i>Approximate recipient area</span></div><p>Estimated logistics—not live vehicle tracking. Exact pickup details stay private until a valid claim.</p></div>`;
+  function hasValue(value) { return value !== null && value !== undefined && value !== ""; }
+
+  function fieldText(field) {
+    const value = state.intake.draft[field];
+    if (field === "quantity_pallets") return `${formatNumber(value)} pallet${Number(value) === 1 ? "" : "s"}`;
+    if (field === "storage_state") return STORAGE_LABELS[value] || title(value);
+    if (field === "transport_mode") return TRANSPORT_CHOICES[value] || title(value);
+    if (field === "pickup_deadline") return `By ${dateTime(value)}`;
+    return String(value);
   }
 
-  async function loadPublicSummary() {
+  function scheduleParse(delay = 800) {
+    window.clearTimeout(state.parseTimer);
+    state.parseTimer = window.setTimeout(() => parseOffer(), delay);
+  }
+
+  async function parseOffer(extra = {}) {
+    window.clearTimeout(state.parseTimer);
+    const input = workspace.querySelector("#offer-text");
+    if (!input) return;
+    const text = input.value.trim();
+    if (!extra.photo && (text.length < 8 || text === state.intake.text)) return;
+    const intake = state.intake;
+    const seq = ++intake.seq;
+    intake.text = text;
+    setParseState(extra.photo ? "Reading the photo…" : "Reading…", "busy");
     try {
-      const summary = await api("/api/public/summary", { token: null });
-      state.publicSummary = summary;
-      const activity = summary.activity || {};
-      const impact = summary.impact || {};
-      const completed = workspace.querySelector("#public-completed");
-      const palletsMoved = workspace.querySelector("#public-pallets");
-      const active = workspace.querySelector("#public-active");
-      const scope = workspace.querySelector("#public-scope");
-      if (completed) completed.textContent = formatNumber(impact.completed_offers ?? 0);
-      if (palletsMoved) palletsMoved.textContent = formatNumber(impact.completed_quantity_pallets ?? 0);
-      if (active) active.textContent = formatNumber(activity.active_offers ?? 0);
-      if (scope) scope.textContent = "Authoritative workflow counts for this demo environment; generated recipient profiles and no external live-capacity feed.";
-    } catch (_err) {
-      const scope = workspace.querySelector("#public-scope");
-      if (scope) scope.textContent = "Workflow totals are temporarily unavailable. No live recipient-capacity feed is connected.";
+      const body = { text };
+      if (extra.photo) body.photo = extra.photo;
+      const result = await api("/api/intake/extract", { method: "POST", body, token: null });
+      if (seq !== intake.seq || state.intake !== intake) return;
+      if (extra.photo) intake.photoUsed = true;
+      mergeDraft(result);
+      setParseState(result.provider === "gemini" ? "Filled in by Gemini. Tap anything to change it." : "Filled in. Tap anything to change it.", "done");
+    } catch (err) {
+      if (seq === intake.seq) setParseState(`${errorMessage(err)} Your text is still here.`, "error");
     }
   }
 
-  function workflowMap(map, titleText = "Offer logistics") {
-    if (!map) return "";
-    const donor = map.donor;
-    const recipients = arrayOf(map.recipients);
-    const markers = recipients.slice(0, 8).map((recipient, index) => {
-      const point = mapPoint(recipient.latitude, recipient.longitude);
-      return point ? `<span class="workflow-point recipient-point" style="left:${point.x}%;top:${point.y}%" title="${e(recipient.name || `Recipient ${index + 1}`)}" aria-hidden="true"></span>` : "";
-    }).join("");
-    const donorPoint = donor ? mapPoint(donor.latitude, donor.longitude) : null;
-    const limitations = arrayOf(map.limitations).join(" ");
-    const routes = recipients.filter((recipient) => recipient.distance_miles != null).slice(0, 3).map((recipient) => {
-      const source = recipient.route_source === "google_routes" ? "Google Routes estimate" : "Haversine estimate";
-      const duration = recipient.estimated_minutes == null ? "" : ` · ${formatNumber(recipient.estimated_minutes)} min`;
-      return `<li><span>${e(recipient.name || recipient.recipient_id)}</span><strong>${e(formatNumber(recipient.distance_miles))} mi${e(duration)}</strong><small>${e(source)}${recipient.traffic_aware ? " · traffic-aware" : " · not live traffic"}</small></li>`;
-    }).join("");
-    const donorLabel = donor ? (donor.label || (donor.precision === "reviewed_address_candidate" ? "Reviewed address candidate" : "Reviewed donor pin")) : "Donor pin private";
-    return `<section class="workflow-map-card" aria-label="${e(titleText)}"><div class="map-topline"><span>${e(titleText)}</span><span class="map-live"><i></i> Estimated logistics</span></div><div class="workflow-map" aria-hidden="true"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span>${markers}${donorPoint ? `<span class="workflow-point donor-point" style="left:${donorPoint.x}%;top:${donorPoint.y}%"></span>` : ""}</div><div class="map-legend"><span><i class="legend-donor"></i>${e(donorLabel)}</span><span><i class="legend-recipient"></i>Approximate recipient area</span></div>${routes ? `<ul class="workflow-routes">${routes}</ul>` : ""}<p>${e(limitations || "Recipient locations and route values are approximate. This is not live tracking.")}</p></section>`;
+  function mergeDraft(result) {
+    const intake = state.intake;
+    const draft = result.draft || {};
+    DRAFT_FIELDS.forEach((field) => {
+      // Never overwrite what the donor typed or tapped; re-reads only fill the rest.
+      if (intake.edited.has(field) || intake.answered.has(field) || !hasValue(draft[field])) return;
+      intake.draft[field] = draft[field];
+      intake.confidence[field] = result.confidence?.[field] || "high";
+    });
+    intake.questions = arrayOf(result.questions);
+    workspace.querySelector("#composer-result").hidden = false;
+    renderDraft();
+    renderPickup();
   }
 
-  function mapPoint(latitude, longitude) {
-    const lat = Number(latitude);
-    const lng = Number(longitude);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    return {
-      x: Math.max(3, Math.min(97, ((lng + 84.55) / .32) * 100)),
-      y: Math.max(4, Math.min(96, ((33.91 - lat) / .3) * 100)),
-    };
+  function renderDraft() {
+    const panel = workspace.querySelector("#draft-panel");
+    if (!panel) return;
+    const intake = state.intake;
+    const chips = DRAFT_FIELDS.filter((field) => hasValue(intake.draft[field]) || intake.editing === field).map(chip).join("");
+    const open = intake.questions.filter((question) => !intake.answered.has(question.field) && !intake.edited.has(question.field) && intake.editing !== question.field);
+    panel.innerHTML = `<div class="chip-row">${chips}</div>${open.map(questionBlock).join("")}${intake.photoUsed ? `<p class="pickup-note">The photo was only used to fill this in. It was not kept.</p>` : ""}`;
+    panel.querySelector(".chip.editing [name=value]")?.focus();
+    updateSubmitState();
   }
 
-  function interactivePinMap() {
-    return `<button class="pin-map" id="pin-map" type="button" aria-label="Place or adjust the pickup pin on an illustrative Atlanta map" aria-describedby="pin-map-help"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span><span id="reviewed-pin" class="reviewed-pin" aria-hidden="true"></span><span class="pin-instruction">Click, tap, or press Enter to place pin</span></button><small id="pin-map-help" class="map-keyboard-help">Keyboard activation places the pin at the center of this illustrative Atlanta map.</small>`;
+  function chip(field) {
+    const intake = state.intake;
+    const wide = field === "description" ? " wide" : "";
+    if (intake.editing === field) return chipEditor(field, wide);
+    const unsure = intake.confidence[field] === "low" && !intake.answered.has(field) && !intake.edited.has(field);
+    return `<button type="button" class="chip${wide}${unsure ? " unsure" : ""}" data-edit="${field}" aria-label="${e(FIELD_LABELS[field])}: ${e(fieldText(field))}${unsure ? " (estimated)" : ""}. Change"><small>${e(FIELD_LABELS[field])}${unsure ? " · estimate" : ""}</small><span>${e(fieldText(field))}</span></button>`;
   }
 
-  function setMapPin(event) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const keyboardActivation = event.detail === 0 || (event.clientX === 0 && event.clientY === 0);
-    const x = keyboardActivation ? .5 : Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    const y = keyboardActivation ? .5 : Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-    state.offerLocation = {
-      latitude: 33.83 - y * 0.13,
-      longitude: -84.48 + x * 0.18,
-      source: "corrected_pin",
-    };
-    positionMapPin();
-    updateLocationSummary();
+  function chipEditor(field, wide) {
+    const value = state.intake.draft[field];
+    const id = `edit-${field}`;
+    const options = (choices) => Object.entries(choices).map(([key, label]) => `<option value="${key}" ${key === value ? "selected" : ""}>${e(label)}</option>`).join("");
+    const control = {
+      description: `<textarea id="${id}" name="value" rows="2" required>${e(value || "")}</textarea>`,
+      quantity_pallets: `<input id="${id}" name="value" type="number" min="0.1" step="0.1" required value="${e(value ?? "")}" />`,
+      pickup_deadline: `<input id="${id}" name="value" type="datetime-local" required value="${e(localDateTimeValue(value))}" />`,
+      storage_state: `<select id="${id}" name="value" required><option value="">Choose…</option>${options(STORAGE_LABELS)}</select>`,
+      transport_mode: `<select id="${id}" name="value" required><option value="">Choose…</option>${options(TRANSPORT_CHOICES)}</select>`,
+    }[field] || `<input id="${id}" name="value" required value="${e(value || "")}" />`;
+    return `<form class="chip editing${wide}" data-field="${field}"><label for="${id}">${e(FIELD_LABELS[field])}</label>${control}<button class="chip-done" type="submit">Done</button></form>`;
   }
 
-  function positionMapPin() {
-    const pin = workspace.querySelector("#reviewed-pin");
-    if (!pin) return;
-    if (!state.offerLocation) { pin.hidden = true; return; }
-    const x = (state.offerLocation.longitude + 84.48) / 0.18;
-    const y = (33.83 - state.offerLocation.latitude) / 0.13;
-    pin.hidden = false;
-    pin.style.left = `${Math.max(2, Math.min(98, x * 100))}%`;
-    pin.style.top = `${Math.max(4, Math.min(96, y * 100))}%`;
+  function questionBlock(question) {
+    const current = state.intake.draft[question.field];
+    if (question.kind === "text") {
+      return `<form class="question" data-question="${e(question.field)}"><label for="q-${e(question.field)}">${e(question.prompt)}</label><div class="question-input"><input id="q-${e(question.field)}" name="value" required /><button class="button secondary" type="submit">OK</button></div></form>`;
+    }
+    const buttons = arrayOf(question.options).map((option) => `<button type="button" class="option ${option.value === current ? "selected" : ""}" data-answer="${e(question.field)}" data-value="${e(JSON.stringify(option.value))}">${e(option.label)}</button>`).join("");
+    return `<fieldset class="question"><legend>${e(question.prompt)}</legend><div class="option-row">${buttons}<button type="button" class="option other" data-edit="${e(question.field)}">Other…</button></div></fieldset>`;
   }
 
-  function locationReviewLabel() {
-    const labels = { gps: "GPS location reviewed. Click the map to correct the pin.", corrected_pin: "Map pin reviewed. Click again to adjust.", address: "Address pin reviewed. Click the map to adjust." };
-    return labels[state.offerLocation?.source] || "Pickup pin reviewed.";
+  function onDraftClick(event) {
+    const intake = state.intake;
+    const answer = event.target.closest("[data-answer]");
+    if (answer) {
+      intake.draft[answer.dataset.answer] = JSON.parse(answer.dataset.value);
+      intake.answered.add(answer.dataset.answer);
+      return renderDraft();
+    }
+    const edit = event.target.closest("[data-edit]");
+    if (edit) {
+      intake.editing = edit.dataset.edit;
+      renderDraft();
+    }
   }
 
-  function updateLocationSummary() {
-    const summary = workspace.querySelector("#location-summary");
-    if (summary) summary.textContent = locationReviewLabel();
+  function onDraftSubmit(event) {
+    event.preventDefault();
+    const form = event.target;
+    const field = form.dataset.field || form.dataset.question;
+    const raw = String(new FormData(form).get("value") || "").trim();
+    if (!field || !raw) return;
+    const value = field === "quantity_pallets" ? Number(raw) : field === "pickup_deadline" ? new Date(raw).toISOString() : raw;
+    state.intake.draft[field] = value;
+    state.intake.edited.add(field);
+    state.intake.editing = "";
+    renderDraft();
   }
 
-  function inferredTag(inferred, field) {
-    return inferred.has(field) ? `<span class="inferred-tag">Suggested · review</span>` : "";
+  function missingForSubmit() {
+    const draft = state.intake.draft;
+    const missing = REQUIRED_FIELDS.filter((field) => !hasValue(draft[field])).map((field) => MISSING_LABELS[field]);
+    if (!state.offerLocation) missing.push("pickup location");
+    return missing;
   }
 
-  function draftWarnings() {
-    const warnings = state.draftMeta.warnings;
-    const photoNote = state.draftMeta.source?.photo_retained === false
-      ? `<div class="notice neutral"><strong>${state.draftMeta.source?.photo_analyzed ? "Photo analyzed." : "Photo handled transiently."}</strong> It was used only to suggest this draft and is not retained by Pantry Relay.</div>` : "";
-    return `${photoNote}${warnings.map((warning) => `<div class="notice warning">${e(warning)}</div>`).join("")}`;
+  function updateSubmitState() {
+    const button = workspace.querySelector("#submit-offer");
+    const hint = workspace.querySelector("#submit-hint");
+    if (!button || !hint) return;
+    const missing = missingForSubmit();
+    button.disabled = missing.length > 0;
+    hint.textContent = missing.length ? `Still needed: ${missing.join(", ")}.` : "Nothing is sent until you press this.";
   }
 
-  function localDateTimeValue(value) {
-    if (!value) return "";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
-    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
-    return date.toISOString().slice(0, 16);
-  }
-
-  function setCaptureStatus(message, danger = false) {
-    const status = workspace.querySelector("#capture-status");
+  function setParseState(message, tone = "") {
+    const status = workspace.querySelector("#parse-state");
     if (!status) return;
     status.textContent = message;
-    status.classList.toggle("danger", danger);
-  }
-
-  function fileAsBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
-      reader.onerror = () => reject(new Error("The photo could not be read."));
-      reader.readAsDataURL(file);
-    });
+    status.dataset.tone = tone;
   }
 
   function loadDemo() {
-    const deadline = new Date(Date.now() + 6 * 60 * 60 * 1000);
-    state.offerLocation = { latitude: 33.749, longitude: -84.388, source: "corrected_pin" };
-    state.draftMeta = {
-      inferredFields: ["description", "quantity_original", "quantity_pallets", "storage_state", "pickup_deadline", "transport_mode"],
-      warnings: ["Demo scenario: downtown Atlanta is a generated anchor, not a live grocer location."],
-      source: { provider: "demo_scenario", photo_analyzed: false, photo_retained: null },
-    };
-    renderDonorReview({ description: "10 crates of fresh spinach, bagged and refrigerated", quantity_original: "10 crates", quantity_pallets: 1, storage_state: "refrigerated", pickup_deadline: deadline.toISOString(), transport_mode: "recipient_pickup", pickup_address: "Downtown Atlanta demo grocery" });
-  }
-
-  async function interpretOfferText() {
-    const text = workspace.querySelector("#offer-text").value.trim();
-    if (!text) return setCaptureStatus("Describe the food before creating a draft.", true);
-    const button = workspace.querySelector("#review-offer");
-    setBusy(button, true, "Creating draft…");
-    try {
-      const body = state.captureMode === "speech" ? { transcript: text } : { text };
-      const result = await api("/api/intake/extract", { method: "POST", body, token: null });
-      adoptDraft(result, { description: text });
-    } catch (err) {
-      setCaptureStatus(`${errorMessage(err)} Your description is still here.`, true);
-    } finally { setBusy(button, false); }
+    const input = workspace.querySelector("#offer-text");
+    input.value = SPINACH_EXAMPLE;
+    state.offerLocation = { ...DEMO_PICKUP };
+    parseOffer();
   }
 
   function startSpeechCapture() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return setCaptureStatus("Speech capture is not supported in this browser. Type your offer instead.", true);
+    if (!SpeechRecognition) return setParseState("Speech isn't supported in this browser. Type instead.", "error");
     if (state.recognition) return state.recognition.stop();
     const button = workspace.querySelector("#speak-offer");
     const recognition = new SpeechRecognition();
-    state.captureMode = "speech";
     state.recognition = recognition;
     recognition.lang = "en-US";
     recognition.interimResults = false;
@@ -296,18 +330,18 @@
     recognition.onstart = () => {
       if (state.recognition !== recognition || !button.isConnected) return;
       button.classList.add("listening");
-      setCaptureStatus("Listening… audio is processed by the browser and is not retained by Pantry Relay.");
+      setParseState("Listening… audio stays in your browser.", "busy");
     };
     recognition.onresult = (event) => {
       if (state.recognition !== recognition) return;
       const transcript = Array.from(event.results).map((result) => result[0].transcript).join(" ").trim();
       const input = workspace.querySelector("#offer-text");
-      if (!input) return;
-      input.value = transcript;
-      setCaptureStatus("Transcript captured. Review the text, then create an editable draft.");
+      if (!input || !transcript) return;
+      input.value = [input.value.trim(), transcript].filter(Boolean).join(" ");
+      parseOffer();
     };
     recognition.onerror = () => {
-      if (state.recognition === recognition) setCaptureStatus("Speech capture ended without a transcript. Type the offer instead.", true);
+      if (state.recognition === recognition) setParseState("Didn't catch that. Try again or type it.", "error");
     };
     recognition.onend = () => {
       if (state.recognition === recognition) state.recognition = null;
@@ -331,134 +365,175 @@
   async function analyzeOfferPhoto(event) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) return setCaptureStatus("Choose a photo smaller than 5 MB.", true);
-    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return setCaptureStatus("Choose a JPEG, PNG, or WebP image.", true);
-    setCaptureStatus(`Reviewing ${file.name}… The photo will only produce an editable draft.`);
+    if (file.size > 5 * 1024 * 1024) return setParseState("Choose a photo smaller than 5 MB.", "error");
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return setParseState("Choose a JPEG, PNG, or WebP image.", "error");
     try {
       const dataBase64 = await fileAsBase64(file);
-      const context = workspace.querySelector("#offer-text").value.trim();
-      const payload = { photo: { mime_type: file.type, data_base64: dataBase64 } };
-      if (context) payload.text = context;
-      const result = await api("/api/intake/extract", { method: "POST", body: payload, token: null });
-      adoptDraft(result, context ? { description: context } : {}, true);
+      await parseOffer({ photo: { mime_type: file.type, data_base64: dataBase64 } });
     } catch (err) {
-      setCaptureStatus(`${errorMessage(err)} The photo was not submitted as an offer.`, true);
+      setParseState(`${errorMessage(err)} Nothing was sent.`, "error");
     } finally {
       event.target.value = "";
     }
   }
 
-  function adoptDraft(result, fallback, photoUsed = false) {
-    const draft = { ...fallback, ...(result?.draft || {}) };
-    const responseSource = result?.source || (result ? { provider: result.provider, photo_analyzed: result.provider === "gemini", photo_retained: result.retained } : null);
-    state.draftMeta = {
-      inferredFields: arrayOf(result?.inferred_fields),
-      warnings: arrayOf(result?.warnings),
-      source: responseSource ? { ...responseSource, photo_retained: photoUsed ? responseSource.photo_retained : null } : null,
-    };
-    renderDonorReview(draft);
+  function fileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+      reader.onerror = () => reject(new Error("The photo could not be read."));
+      reader.readAsDataURL(file);
+    });
   }
 
-  function renderDonorReview(draft) {
-    stopSpeechCapture();
-    const inferred = new Set(state.draftMeta.inferredFields);
-    const storage = draft.storage_state || "";
-    const transport = draft.transport_mode || "";
-    workspace.innerHTML = `
-      <section class="hero compact review-hero"><p class="eyebrow">Review before outreach</p><h1>Check the rescue details.</h1><p>Every inferred field is editable. Nothing has been sent to a recipient yet.</p></section>
-      <div class="review-layout">
-        <section class="panel form-panel" aria-labelledby="review-title"><div class="section-heading"><div><p class="kicker">Editable offer</p><h2 id="review-title">What recipients will evaluate</h2></div><button class="button quiet" id="back-to-capture" type="button">Start over</button></div>
-        ${draftWarnings()}
-        <form id="offer-form">
-          <div class="field"><label for="description">Food description ${inferredTag(inferred, "description")}</label><textarea id="description" name="description" required rows="3">${e(draft.description || "")}</textarea></div>
-          <div class="form-grid thirds"><div class="field"><label for="quantity-original">Quantity ${inferredTag(inferred, "quantity_original")}</label><input id="quantity-original" name="quantity_original" required value="${e(draft.quantity_original || "")}" placeholder="10 crates" /></div><div class="field"><label for="quantity-pallets">Pallet estimate ${inferredTag(inferred, "quantity_pallets")}</label><input id="quantity-pallets" name="quantity_pallets" required type="number" min="0.1" step="0.1" value="${e(draft.quantity_pallets ?? "")}" placeholder="1" /></div><div class="field"><label for="deadline">Must move by ${inferredTag(inferred, "pickup_deadline")}</label><input id="deadline" name="pickup_deadline" required type="datetime-local" value="${e(localDateTimeValue(draft.pickup_deadline))}" /></div></div>
-          <fieldset class="field"><legend>Required storage ${inferredTag(inferred, "storage_state")}</legend><div class="choice-row">${radio("storage_state", "refrigerated", "Refrigerated", storage === "refrigerated")}${radio("storage_state", "frozen", "Frozen", storage === "frozen")}${radio("storage_state", "ambient", "Shelf stable", storage === "ambient")}</div></fieldset>
-          <div class="location-review"><div class="section-heading small"><div><p class="kicker">Reviewed pickup point</p><h3>Place the private donor pin</h3></div><button class="button secondary" id="use-location" type="button">Use my location</button></div><div class="field"><label for="pickup-address">Pickup address <span class="optional-label">Optional</span></label><div class="address-row"><input id="pickup-address" name="pickup_address" autocomplete="street-address" value="${e(draft.pickup_address || "")}" placeholder="Store or street address" /><button class="button secondary" id="find-address" type="button">Find address</button></div><small>Find an Atlanta-area address, use GPS, or place the map pin. Any one option is enough.</small></div>${interactivePinMap()}<p id="location-summary" class="map-caption">${state.offerLocation ? locationReviewLabel() : "Find an address, use GPS, or click the map to place a reviewed pickup pin."}</p><p class="notice neutral">Exact coordinates are hidden from recipients until a valid claim. Media analysis never infers location.</p></div>
-          <fieldset class="field"><legend>Transport plan ${inferredTag(inferred, "transport_mode")}</legend><div class="transport-grid">${radio("transport_mode", "recipient_pickup", "Recipient pickup", transport === "recipient_pickup", "Recipient reconfirms cold-chain transport.")}${radio("transport_mode", "donor_delivery", "Donor delivery", transport === "donor_delivery", "Maximum 5 km in this release.")}${radio("transport_mode", "transportation_needed", "Transport needed", transport === "transportation_needed", "Blocks confirmation until resolved.")}</div></fieldset>
-          <div class="field radius-field" ${transport === "donor_delivery" ? "" : "hidden"}><label for="delivery-radius">Delivery radius (km, maximum 5)</label><input id="delivery-radius" name="donor_delivery_radius_km" type="number" min="0.1" max="5" step="0.1" value="5" /></div>
-          <div id="form-error" class="notice danger" role="alert" hidden></div><button class="button primary wide" type="submit">I reviewed this offer — notify recipients <span aria-hidden="true">→</span></button><p class="submit-note">Your confirmed deadline is authoritative. FoodKeeper context, if shown later, is advisory only.</p>
-        </form></section>
-        <aside class="review-aside">${landingMap(true)}<div class="panel decision-card"><p class="kicker">What happens next</p><ol><li>Retrieve 30 likely profiles by meaning.</li><li>Apply non-negotiable safety and logistics rules.</li><li>Notify up to three feasible recipients.</li></ol><strong>Vector search finds possibilities. Rules decide eligibility.</strong></div></aside>
-      </div>`;
-    const form = workspace.querySelector("#offer-form");
-    workspace.querySelector("#back-to-capture").addEventListener("click", () => { state.offerLocation = null; renderDonorForm(); });
-    workspace.querySelector("#use-location").addEventListener("click", () => useLocation(form));
-    workspace.querySelector("#find-address").addEventListener("click", () => findAddress(form));
-    workspace.querySelector("#pin-map").addEventListener("click", setMapPin);
-    positionMapPin();
-    form.addEventListener("change", (event) => { if (event.target.name === "transport_mode") form.querySelector(".radius-field").hidden = event.target.value !== "donor_delivery"; });
-    form.addEventListener("submit", submitOffer);
+  function localDateTimeValue(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+    return date.toISOString().slice(0, 16);
   }
 
-  async function findAddress(form) {
-    const address = form.elements.pickup_address.value.trim();
-    const button = form.querySelector("#find-address");
-    if (!address) {
-      form.elements.pickup_address.focus();
-      return showToast("Enter a complete pickup address first.", true);
+  function readSavedPickup() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SAVED_PICKUP_KEY));
+      return Number.isFinite(saved?.latitude) && Number.isFinite(saved?.longitude) ? { ...saved, saved: true } : null;
+    } catch (_err) { return null; }
+  }
+
+  function setPickup(location) {
+    state.offerLocation = location;
+    const input = workspace.querySelector("#pickup-address");
+    if (input && location.address) input.value = location.address;
+    renderPickup();
+    updateSubmitState();
+  }
+
+  async function renderPickup() {
+    const container = workspace.querySelector("#pickup-map");
+    if (!container) return;
+    const input = workspace.querySelector("#pickup-address");
+    if (input && state.offerLocation?.address && !input.value) input.value = state.offerLocation.address;
+    const note = workspace.querySelector("#pickup-note");
+    if (note) note.textContent = state.offerLocation?.saved ? "Using your saved pickup spot. Only the recipient who claims the food sees it." : "Only the recipient who claims the food sees the exact spot.";
+    const maps = await loadGoogleMaps();
+    if (!container.isConnected) return;
+    if (!maps) return renderFallbackPickup(container);
+    if (!state.pickupMap || state.pickupMap.container !== container) {
+      const [{ Map }, { AdvancedMarkerElement }] = await Promise.all([maps.importLibrary("maps"), maps.importLibrary("marker")]);
+      const map = new Map(container, { center: ATLANTA_CENTER, zoom: 11, mapId: state.mapsConfig.map_id, disableDefaultUI: true, zoomControl: true, gestureHandling: "cooperative" });
+      const marker = new AdvancedMarkerElement({ map: null, gmpDraggable: true, title: "Pickup spot. Drag to adjust." });
+      marker.addListener("dragend", () => {
+        const position = marker.position;
+        setPickup({ latitude: lat(position), longitude: lng(position), source: "corrected_pin", address: state.offerLocation?.address || "" });
+      });
+      map.addListener("click", (event) => setPickup({ latitude: event.latLng.lat(), longitude: event.latLng.lng(), source: "corrected_pin", address: state.offerLocation?.address || "" }));
+      state.pickupMap = { container, map, marker };
+      mountPlaceAutocomplete(maps);
     }
-    setBusy(button, true, "Finding…");
+    const { map, marker } = state.pickupMap;
+    if (state.offerLocation) {
+      const position = { lat: state.offerLocation.latitude, lng: state.offerLocation.longitude };
+      marker.position = position;
+      marker.map = map;
+      map.panTo(position);
+      if (map.getZoom() < 14) map.setZoom(15);
+    } else {
+      marker.map = null;
+    }
+  }
+
+  async function mountPlaceAutocomplete(maps) {
+    try {
+      const { PlaceAutocompleteElement } = await maps.importLibrary("places");
+      const slot = workspace.querySelector("#pickup-address-slot");
+      if (!slot || !PlaceAutocompleteElement) return;
+      const autocomplete = new PlaceAutocompleteElement({ includedRegionCodes: ["us"], locationBias: { center: ATLANTA_CENTER, radius: 40000 } });
+      autocomplete.id = "pickup-autocomplete";
+      autocomplete.setAttribute("aria-label", "Pickup address");
+      autocomplete.addEventListener("gmp-select", async ({ placePrediction }) => {
+        const place = placePrediction.toPlace();
+        await place.fetchFields({ fields: ["formattedAddress", "location"] });
+        setPickup({ latitude: place.location.lat(), longitude: place.location.lng(), source: "address", address: place.formattedAddress || "" });
+      });
+      slot.replaceChildren(autocomplete);
+    } catch (_err) {
+      // Places is optional: the plain address field still geocodes on Enter.
+    }
+  }
+
+  function renderFallbackPickup(container) {
+    if (!container.querySelector("#pin-map")) {
+      container.innerHTML = `<button class="pin-map" id="pin-map" type="button" aria-label="Place the pickup pin on an illustrative Atlanta map"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span><span id="reviewed-pin" class="reviewed-pin" aria-hidden="true"></span><span class="pin-instruction">Tap to place the pin</span></button>`;
+      container.querySelector("#pin-map").addEventListener("click", (event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        const keyboard = event.detail === 0;
+        const x = keyboard ? .5 : Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+        const y = keyboard ? .5 : Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+        setPickup({ latitude: 33.83 - y * 0.13, longitude: -84.48 + x * 0.18, source: "corrected_pin", address: state.offerLocation?.address || "" });
+      });
+    }
+    const pin = container.querySelector("#reviewed-pin");
+    pin.hidden = !state.offerLocation;
+    if (state.offerLocation) {
+      pin.style.left = `${Math.max(2, Math.min(98, ((state.offerLocation.longitude + 84.48) / 0.18) * 100))}%`;
+      pin.style.top = `${Math.max(4, Math.min(96, ((33.83 - state.offerLocation.latitude) / 0.13) * 100))}%`;
+    }
+  }
+
+  async function findAddress() {
+    const input = workspace.querySelector("#pickup-address");
+    const address = input?.value.trim();
+    if (!address) return;
+    setParseState("Finding the address…", "busy");
     try {
       const result = await api("/api/locations/geocode", { method: "POST", body: { address }, token: null });
-      if (!Number.isFinite(Number(result.latitude)) || !Number.isFinite(Number(result.longitude))) throw new Error("That address did not return a usable pickup pin.");
-      state.offerLocation = { latitude: Number(result.latitude), longitude: Number(result.longitude), source: "address" };
-      if (result.formatted_address) form.elements.pickup_address.value = result.formatted_address;
-      positionMapPin();
-      updateLocationSummary();
-      showToast("Address found. Review the pin before outreach.");
+      if (!Number.isFinite(Number(result.latitude)) || !Number.isFinite(Number(result.longitude))) throw new Error("That address didn't return a usable location.");
+      setPickup({ latitude: Number(result.latitude), longitude: Number(result.longitude), source: "address", address: result.formatted_address || address });
+      setParseState("Address found. Drag the pin if it's off.", "done");
     } catch (err) {
-      showToast(errorMessage(err), true);
-    } finally {
-      setBusy(button, false);
+      setParseState(errorMessage(err), "error");
     }
   }
 
-  function useLocation(form) {
-    const button = form.querySelector("#use-location");
-    if (!navigator.geolocation) return showToast("This browser does not provide location. Enter an address and reviewed pin instead.");
-    button.disabled = true;
-    button.textContent = "Locating…";
+  function useLocation() {
+    const button = workspace.querySelector("#use-location");
+    if (!navigator.geolocation) return setParseState("This browser can't share location. Enter an address instead.", "error");
+    setBusy(button, true, "Locating…");
     navigator.geolocation.getCurrentPosition((position) => {
-      state.offerLocation = { latitude: position.coords.latitude, longitude: position.coords.longitude, source: "gps" };
-      positionMapPin();
-      updateLocationSummary();
-      button.textContent = "Location added";
-      button.disabled = false;
+      setBusy(button, false);
+      setPickup({ latitude: position.coords.latitude, longitude: position.coords.longitude, source: "gps", address: "" });
     }, () => {
-      button.textContent = "Use my location";
-      button.disabled = false;
-      showToast("Location was not shared. Enter an address and reviewed pin instead.");
+      setBusy(button, false);
+      setParseState("Location wasn't shared. Enter an address instead.", "error");
     }, { enableHighAccuracy: false, timeout: 8000 });
   }
 
-  async function submitOffer(event) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    if (!form.reportValidity()) return;
-    const button = form.querySelector("[type=submit]");
-    const error = form.querySelector("#form-error");
-    const data = new FormData(form);
-    const transport = String(data.get("transport_mode"));
-    const pickupAddress = String(data.get("pickup_address") || "").trim() || ({ gps: "GPS-selected pickup", corrected_pin: "Map-selected pickup", address: "Address-selected pickup" }[state.offerLocation?.source] || "Reviewed pickup location");
+  async function submitOffer() {
+    const button = workspace.querySelector("#submit-offer");
+    const error = workspace.querySelector("#form-error");
+    if (missingForSubmit().length) return updateSubmitState();
+    const draft = state.intake.draft;
+    const pickup = state.offerLocation;
     const payload = {
-      description: String(data.get("description")).trim(),
-      quantity_original: String(data.get("quantity_original")).trim(),
-      quantity_pallets: Number(data.get("quantity_pallets")),
-      storage_state: String(data.get("storage_state")),
-      pickup_deadline: new Date(String(data.get("pickup_deadline"))).toISOString(),
-      pickup_address: pickupAddress,
-      donor_latitude: state.offerLocation?.latitude,
-      donor_longitude: state.offerLocation?.longitude,
-      location_source: state.offerLocation?.source,
-      transport_mode: transport,
+      description: String(draft.description).trim(),
+      quantity_original: String(draft.quantity_original || "").trim() || null,
+      quantity_pallets: Number(draft.quantity_pallets),
+      storage_state: draft.storage_state,
+      pickup_deadline: new Date(draft.pickup_deadline).toISOString(),
+      pickup_address: pickup.address || ({ gps: "GPS-selected pickup", corrected_pin: "Map-selected pickup", address: "Address-selected pickup" }[pickup.source] || "Reviewed pickup location"),
+      donor_latitude: pickup.latitude,
+      donor_longitude: pickup.longitude,
+      location_source: pickup.source,
+      transport_mode: draft.transport_mode,
     };
-    if (transport === "donor_delivery") payload.donor_delivery_radius_km = Number(data.get("donor_delivery_radius_km"));
-    if (!state.offerLocation) { error.textContent = "Place the reviewed pickup pin or use your location before notifying recipients."; error.hidden = false; return; }
-    setBusy(button, true, "Creating rescue…");
+    if (draft.transport_mode === "donor_delivery") payload.donor_delivery_radius_km = 5;
+    setBusy(button, true, "Finding a home…");
     error.hidden = true;
     try {
       const result = await api("/api/offers", { method: "POST", body: payload, mutation: true, token: null });
       if (!result.status_token) throw new Error("The offer was created without a private status link. Please retry.");
+      if (pickup.source !== "corrected_pin" || pickup.address) localStorage.setItem(SAVED_PICKUP_KEY, JSON.stringify({ latitude: pickup.latitude, longitude: pickup.longitude, source: pickup.source, address: pickup.address || "" }));
       sessionStorage.setItem(tokenKey("donor"), result.status_token);
       state.token = result.status_token;
       state.demoRecipients = Array.isArray(result.recipient_access) ? result.recipient_access : [];
@@ -473,6 +548,98 @@
     } finally {
       setBusy(button, false);
     }
+  }
+
+  function loadGoogleMaps() {
+    if (!state.mapsPromise) state.mapsPromise = api("/api/config", { token: null }).then((config) => {
+      const key = config?.maps?.browser_key;
+      if (!key) return null;
+      state.mapsConfig = config.maps;
+      return new Promise((resolve) => {
+        window.gm_authFailure = () => {
+          // A rejected key: drop live maps and fall back to the drawn ones
+          // without discarding anything the donor has typed.
+          state.mapsFailed = true;
+          state.pickupMap = null;
+          state.mapCache.clear();
+          if (state.role === "donor") renderPickup(); else render();
+        };
+        window.__pantryRelayMapsReady = () => resolve(window.google.maps);
+        const script = document.createElement("script");
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&v=weekly&loading=async&callback=__pantryRelayMapsReady`;
+        script.async = true;
+        script.onerror = () => resolve(null);
+        document.head.append(script);
+      });
+    }).catch(() => null);
+    return state.mapsPromise.then((maps) => (state.mapsFailed ? null : maps));
+  }
+
+  function lat(position) { return typeof position.lat === "function" ? position.lat() : position.lat; }
+  function lng(position) { return typeof position.lng === "function" ? position.lng() : position.lng; }
+
+  function workflowMap(map, titleText = "Offer logistics") {
+    if (!map) return "";
+    const donor = map.donor;
+    const recipients = arrayOf(map.recipients);
+    const markers = recipients.slice(0, 8).map((recipient, index) => {
+      const point = mapPoint(recipient.latitude, recipient.longitude);
+      return point ? `<span class="workflow-point recipient-point" style="left:${point.x}%;top:${point.y}%" title="${e(recipient.name || `Recipient ${index + 1}`)}" aria-hidden="true"></span>` : "";
+    }).join("");
+    const donorPoint = donor ? mapPoint(donor.latitude, donor.longitude) : null;
+    const routes = recipients.filter((recipient) => recipient.distance_miles != null).slice(0, 3).map((recipient) => {
+      const duration = recipient.estimated_minutes == null ? "" : ` · ${formatNumber(recipient.estimated_minutes)} min`;
+      return `<li><span>${e(recipient.name || recipient.recipient_id)}</span><strong>${e(formatNumber(recipient.distance_miles))} mi${e(duration)}</strong></li>`;
+    }).join("");
+    const mapData = { donor: donor ? { latitude: donor.latitude, longitude: donor.longitude } : null, recipients: recipients.slice(0, 8).map((recipient) => ({ latitude: recipient.latitude, longitude: recipient.longitude, name: recipient.name || recipient.recipient_id || "" })) };
+    return `<section class="workflow-map-card" aria-label="${e(titleText)}"><div class="map-topline"><span>${e(titleText)}</span></div><div class="workflow-map" data-map="${e(JSON.stringify(mapData))}" aria-hidden="true"><span class="road road-a"></span><span class="road road-b"></span><span class="road road-c"></span><span class="city-label midtown">Midtown</span><span class="city-label downtown">Downtown</span><span class="city-label westside">Westside</span>${markers}${donorPoint ? `<span class="workflow-point donor-point" style="left:${donorPoint.x}%;top:${donorPoint.y}%"></span>` : ""}</div><div class="map-legend"><span><i class="legend-donor"></i>Pickup</span><span><i class="legend-recipient"></i>Recipient area (approximate)</span></div>${routes ? `<ul class="workflow-routes">${routes}</ul>` : ""}</section>`;
+  }
+
+  async function hydrateMaps() {
+    const placeholders = [...workspace.querySelectorAll("[data-map]")];
+    if (!placeholders.length) return;
+    const maps = await loadGoogleMaps();
+    if (!maps) return;
+    const [{ Map, Circle }, { AdvancedMarkerElement, PinElement }] = await Promise.all([maps.importLibrary("maps"), maps.importLibrary("marker")]);
+    placeholders.forEach((placeholder) => {
+      if (!placeholder.isConnected) return;
+      const key = placeholder.dataset.map;
+      // Polling redraws the page every few seconds; reuse the live map so it
+      // neither flickers nor counts as a new map load.
+      const cached = state.mapCache.get(key);
+      if (cached) return placeholder.replaceWith(cached);
+      const data = JSON.parse(key);
+      const element = document.createElement("div");
+      element.className = "workflow-map google-map";
+      element.dataset.map = key;
+      placeholder.replaceWith(element);
+      const map = new Map(element, { center: ATLANTA_CENTER, zoom: 11, mapId: state.mapsConfig.map_id, disableDefaultUI: true, zoomControl: true, gestureHandling: "cooperative" });
+      const bounds = new maps.LatLngBounds();
+      if (data.donor) {
+        const position = { lat: data.donor.latitude, lng: data.donor.longitude };
+        new AdvancedMarkerElement({ map, position, title: "Pickup", content: new PinElement({ background: "#145f45", borderColor: "#0c4733", glyphColor: "#d2e27e" }).element });
+        bounds.extend(position);
+      }
+      data.recipients.forEach((recipient) => {
+        if (!Number.isFinite(Number(recipient.latitude))) return;
+        const center = { lat: Number(recipient.latitude), lng: Number(recipient.longitude) };
+        // Recipient locations are approximate, so they are drawn as areas, not pins.
+        new Circle({ map, center, radius: 700, strokeColor: "#8c560f", strokeWeight: 1, fillColor: "#d9a441", fillOpacity: .35 });
+        bounds.extend(center);
+      });
+      if (!bounds.isEmpty()) map.fitBounds(bounds, 48);
+      state.mapCache.set(key, element);
+    });
+  }
+
+  function mapPoint(latitude, longitude) {
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return {
+      x: Math.max(3, Math.min(97, ((lng + 84.55) / .32) * 100)),
+      y: Math.max(4, Math.min(96, ((33.91 - lat) / .3) * 100)),
+    };
   }
 
   function renderDonorStatus() {
@@ -528,6 +695,7 @@
     workspace.querySelector("#refresh-status").addEventListener("click", loadDonorStatus);
     workspace.querySelector("#new-offer").addEventListener("click", () => clearToken("donor", "donor"));
     bindDemoRecipientButtons();
+    hydrateMaps();
   }
 
   function demoAccess(access, candidates, currentWave) {
@@ -589,6 +757,7 @@
       drawRecipient();
     }));
     bindRecipientActions(current);
+    hydrateMaps();
   }
 
   function notificationCard(item) {
@@ -738,6 +907,7 @@
     workspace.querySelector("#refresh-equity")?.addEventListener("click", loadEquityAudit);
     workspace.querySelectorAll(".ops-card").forEach((button) => button.addEventListener("click", () => { state.selectedOfferId = button.dataset.offerId; drawCoordinator(); }));
     workspace.querySelectorAll("[data-ops-action]").forEach((button) => button.addEventListener("click", () => runOpsAction(button, current)));
+    hydrateMaps();
   }
 
   function equityProof(audit) {

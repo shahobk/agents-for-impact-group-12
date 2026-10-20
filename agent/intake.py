@@ -12,7 +12,25 @@ from typing import Any
 
 
 PhotoProvider = Callable[[bytes, str, str], Awaitable[Mapping[str, Any]]]
+TextProvider = Callable[[str, datetime], Awaitable[Mapping[str, Any]]]
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+DRAFT_FIELDS = (
+    "description",
+    "quantity_original",
+    "quantity_pallets",
+    "storage_state",
+    "pickup_deadline",
+    "transport_mode",
+)
+# Fields the donor must settle before an offer can be created. Description is
+# always the donor's own words, so it never needs a follow-up question.
+QUESTION_FIELDS = (
+    "quantity_original",
+    "quantity_pallets",
+    "storage_state",
+    "pickup_deadline",
+    "transport_mode",
+)
 _NUMBER_WORDS = {
     "one": 1,
     "two": 2,
@@ -46,6 +64,39 @@ def _number(value: str) -> float | None:
         return float(value)
     except ValueError:
         return float(_NUMBER_WORDS[value.lower()]) if value.lower() in _NUMBER_WORDS else None
+
+
+def _atlanta_time(value: datetime) -> datetime:
+    """Convert to Atlanta wall-clock time, even without a system tz database."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return value.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        # US Eastern DST: second Sunday of March to first Sunday of November.
+        year = value.year
+        march = datetime(year, 3, 8, 7, tzinfo=timezone.utc)
+        november = datetime(year, 11, 1, 6, tzinfo=timezone.utc)
+        dst_start = march + timedelta(days=(6 - march.weekday()) % 7)
+        dst_end = november + timedelta(days=(6 - november.weekday()) % 7)
+        offset = -4 if dst_start <= value < dst_end else -5
+        return value.astimezone(timezone(timedelta(hours=offset)))
+
+
+def _next_clock_time(now: datetime, hour: int, minute: int = 0) -> datetime:
+    """Return the next Atlanta-local occurrence of hour:minute after now."""
+    local_now = _atlanta_time(now)
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= local_now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _clock_label(value: datetime, now: datetime) -> str:
+    local = _atlanta_time(value)
+    day = "today" if local.date() == _atlanta_time(now).date() else "tomorrow"
+    clock = local.strftime("%I:%M %p").lstrip("0").replace(":00", "").lower()
+    return f"{clock} {day}"
 
 
 def _blank_draft(description: str = "") -> dict[str, Any]:
@@ -106,6 +157,18 @@ def deterministic_interpret(text: str, *, now: datetime) -> dict[str, Any]:
         if hours and hours > 0:
             draft["pickup_deadline"] = _iso(now + timedelta(hours=hours))
             inferred.append("pickup_deadline")
+    else:
+        clock_match = re.search(
+            r"\b(?:by|before|until|till)\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)",
+            lower,
+        )
+        if clock_match:
+            hour = int(clock_match.group(1))
+            minute = int(clock_match.group(2) or 0)
+            if 1 <= hour <= 12 and minute < 60:
+                hour = hour % 12 + (12 if clock_match.group(3).startswith("p") else 0)
+                draft["pickup_deadline"] = _iso(_next_clock_time(now, hour, minute))
+                inferred.append("pickup_deadline")
 
     if re.search(r"\bI can deliver|donor delivery|we can deliver\b", lower):
         draft["transport_mode"] = "donor_delivery"
@@ -123,15 +186,69 @@ def deterministic_interpret(text: str, *, now: datetime) -> dict[str, Any]:
     warnings.append(
         "All inferred quantity, storage, transport, and deadline fields require donor review."
     )
-    return {
-        "draft": draft,
-        "inferred_fields": list(dict.fromkeys(inferred)),
-        "missing_fields": missing,
-        "warnings": warnings,
-        "provider": "deterministic_fallback",
-        "retained": False,
-        "review_required": True,
-    }
+    confidence = {key: "high" for key in inferred}
+    if "quantity_pallets" in inferred and not draft["quantity_original"].endswith(("pallet", "pallets")):
+        # Crate-to-pallet conversion is a demo normalization, not a reading.
+        confidence["quantity_pallets"] = "low"
+    return _with_questions(
+        {
+            "draft": draft,
+            "inferred_fields": list(dict.fromkeys(inferred)),
+            "missing_fields": missing,
+            "confidence": confidence,
+            "warnings": warnings,
+            "provider": "deterministic_fallback",
+            "retained": False,
+            "review_required": True,
+        },
+        now,
+    )
+
+
+def _option(label: str, value: Any) -> dict[str, Any]:
+    return {"label": label, "value": value}
+
+
+def _question(field: str, draft: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """Build one tap-to-answer follow-up for a missing or uncertain field."""
+    if field == "quantity_original":
+        return {"field": field, "prompt": "How much food is there?", "kind": "text", "options": []}
+    if field == "quantity_pallets":
+        amount = draft.get("quantity_original")
+        prompt = f"Roughly how many pallets is {amount}?" if amount else "Roughly how many pallets?"
+        options = [_option("Under half", 0.25), _option("About half", 0.5), _option("1", 1.0), _option("2", 2.0), _option("3+", 3.0)]
+        return {"field": field, "prompt": prompt, "kind": "choice", "options": options}
+    if field == "storage_state":
+        options = [_option("Refrigerated", "refrigerated"), _option("Frozen", "frozen"), _option("Shelf stable", "ambient")]
+        return {"field": field, "prompt": "How does it need to be stored?", "kind": "choice", "options": options}
+    if field == "pickup_deadline":
+        choices = {
+            _iso(now + timedelta(hours=2)): "In 2 hours",
+            _iso(now + timedelta(hours=4)): "In 4 hours",
+        }
+        evening = _next_clock_time(now, 20)
+        choices.setdefault(_iso(evening), f"By {_clock_label(evening, now)}")
+        options = [_option(label, iso) for iso, label in sorted(choices.items())]
+        return {"field": field, "prompt": "When does it need to be gone by?", "kind": "choice", "options": options}
+    options = [
+        _option("They pick up", "recipient_pickup"),
+        _option("We can deliver", "donor_delivery"),
+        _option("Need a driver", "transportation_needed"),
+    ]
+    return {"field": field, "prompt": "Who handles transport?", "kind": "choice", "options": options}
+
+
+def _with_questions(result: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Ask only about fields that are missing or that the reader was unsure of."""
+    draft = result["draft"]
+    confidence = result.setdefault("confidence", {})
+    needs_answer = [
+        field
+        for field in QUESTION_FIELDS
+        if draft.get(field) in {None, ""} or confidence.get(field) == "low"
+    ]
+    result["questions"] = [_question(field, draft, now) for field in needs_answer]
+    return result
 
 
 def _validate_image(data: bytes, mime_type: str, max_bytes: int) -> None:
@@ -195,9 +312,11 @@ class IntakeInterpreter:
         self,
         *,
         photo_provider: PhotoProvider | None = None,
+        text_provider: TextProvider | None = None,
         max_photo_bytes: int = 5 * 1024 * 1024,
     ) -> None:
         self.photo_provider = photo_provider
+        self.text_provider = text_provider
         self.max_photo_bytes = max_photo_bytes
 
     async def extract(
@@ -230,33 +349,33 @@ class IntakeInterpreter:
             _validate_image(data, photo_mime_type, self.max_photo_bytes)
 
         fallback = deterministic_interpret(combined, now=at)
-        if data is None or self.photo_provider is None:
-            if data is not None:
+        if data is None:
+            if self.text_provider is None or not combined:
+                return fallback
+            try:
+                provider_value = await self.text_provider(combined, at)
+                return _provider_result(provider_value, combined, at, [])
+            except Exception:
                 fallback["warnings"].insert(
                     0,
-                    "Photo analysis is unavailable; only supplied text was interpreted.",
+                    "The intake assistant was unavailable; deterministic text interpretation was used.",
                 )
+                return fallback
+        if self.photo_provider is None:
+            fallback["warnings"].insert(
+                0,
+                "Photo analysis is unavailable; only supplied text was interpreted.",
+            )
             return fallback
 
         try:
             provider_value = await self.photo_provider(data, photo_mime_type or "", combined)
-            draft = _safe_provider_draft(provider_value.get("draft", provider_value), combined)
-            inferred = [key for key, value in draft.items() if value not in {None, ""}]
-            warnings = [
-                str(item)[:500] for item in provider_value.get("warnings", []) if item
-            ]
-            warnings.append(
-                "Photo suggestions are not food-safety decisions and require donor review."
+            return _provider_result(
+                provider_value,
+                combined,
+                at,
+                ["Photo suggestions are not food-safety decisions and require donor review."],
             )
-            return {
-                "draft": draft,
-                "inferred_fields": inferred,
-                "missing_fields": [key for key, value in draft.items() if value in {None, ""}],
-                "warnings": warnings,
-                "provider": "gemini",
-                "retained": False,
-                "review_required": True,
-            }
         except Exception:
             fallback["warnings"].insert(
                 0,
@@ -267,6 +386,82 @@ class IntakeInterpreter:
             # No reference escapes this request. The bytes are never written to
             # Firestore, Cloud Storage, logs, command receipts, or the response.
             data = None
+
+
+def _provider_result(
+    provider_value: Mapping[str, Any],
+    context: str,
+    now: datetime,
+    extra_warnings: list[str],
+) -> dict[str, Any]:
+    draft = _safe_provider_draft(provider_value.get("draft", provider_value), context)
+    inferred = [key for key, value in draft.items() if value not in {None, ""}]
+    raw_confidence = provider_value.get("confidence")
+    raw_confidence = raw_confidence if isinstance(raw_confidence, Mapping) else {}
+    confidence = {
+        key: "low" if raw_confidence.get(key) == "low" else "high" for key in inferred
+    }
+    warnings = [str(item)[:500] for item in provider_value.get("warnings", []) if item]
+    warnings.extend(extra_warnings)
+    return _with_questions(
+        {
+            "draft": draft,
+            "inferred_fields": inferred,
+            "missing_fields": [key for key, value in draft.items() if value in {None, ""}],
+            "confidence": confidence,
+            "warnings": warnings,
+            "provider": "gemini",
+            "retained": False,
+            "review_required": True,
+        },
+        now,
+    )
+
+
+def _extraction_instructions(now: datetime) -> str:
+    local_now = _atlanta_time(now)
+    return (
+        "You turn a grocery donor's description of surplus food into an offer draft. "
+        "Return JSON only, shaped as {\"draft\": {...}, \"confidence\": {...}, \"warnings\": [...]}. "
+        "draft fields: description (a short plain summary of the food and packaging, keeping the "
+        "donor's details), quantity_original (the amount in the donor's own units, e.g. \"40 cases\"), "
+        "quantity_pallets (number; estimate from the units when not stated, e.g. a standard pallet "
+        "holds roughly 40-60 grocery cases or 10 produce crates), storage_state (one of ambient, "
+        "refrigerated, frozen), pickup_deadline (ISO 8601 with offset), transport_mode (one of "
+        "recipient_pickup, donor_delivery, transportation_needed). "
+        "confidence maps each draft field you filled to \"high\" when the donor stated it and "
+        "\"low\" when you estimated it. Use null for anything not stated or reasonably implied. "
+        "Resolve relative times such as \"before we close at 9\" or \"tonight\" against the donor's "
+        f"local time, which is {local_now.isoformat()} ({local_now.strftime('%A')}, Atlanta). "
+        "Never judge food safety, and never invent a deadline, location, or contact detail."
+    )
+
+
+def build_gemini_text_provider(
+    *, project: str | None, location: str, model: str
+) -> TextProvider | None:
+    if not project:
+        return None
+
+    async def provider(text: str, now: datetime) -> Mapping[str, Any]:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=[
+                types.Part.from_text(
+                    text=f"{_extraction_instructions(now)}\n\nDonor description: {text[:4000]}"
+                ),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json", temperature=0
+            ),
+        )
+        return json.loads((response.text or "{}").strip())
+
+    return provider
 
 
 def build_gemini_photo_provider(
@@ -281,10 +476,9 @@ def build_gemini_photo_provider(
 
         client = genai.Client(vertexai=True, project=project, location=location)
         prompt = (
-            "Return JSON only with a draft object containing description, quantity_original, "
-            "quantity_pallets, storage_state, pickup_deadline, and transport_mode, plus a warnings "
-            "array. Use null when uncertain. Never infer food safety or a deadline that is not visible "
-            f"or stated. Optional donor context: {context[:2000]}"
+            f"{_extraction_instructions(datetime.now(timezone.utc))} "
+            "Read quantities, packaging, and label dates from the photo; a label date is not a "
+            f"pickup deadline. Optional donor context: {context[:2000]}"
         )
         response = await client.aio.models.generate_content(
             model=model,
@@ -305,5 +499,6 @@ __all__ = [
     "IntakeError",
     "IntakeInterpreter",
     "build_gemini_photo_provider",
+    "build_gemini_text_provider",
     "deterministic_interpret",
 ]

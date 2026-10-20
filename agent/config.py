@@ -38,11 +38,14 @@ class Settings:
     workflow_matcher_enabled: bool = True
     workflow_demo_fallback: bool = True
     enable_photo_intake: bool = False
+    enable_text_intake: bool = True
     photo_intake_model: str = "gemini-2.5-flash"
     max_photo_bytes: int = 5 * 1024 * 1024
     enable_google_geocoding: bool = False
     enable_google_routes: bool = False
     maps_timeout_seconds: float = 3.0
+    google_maps_browser_key: str = ""
+    google_maps_map_id: str = "DEMO_MAP_ID"
     hold_minutes: int = 10
     response_window_minutes: int = 10
     cors_allow_origins: tuple[str, ...] = (
@@ -117,6 +120,9 @@ class Settings:
             enable_photo_intake=_as_bool(
                 os.getenv("ENABLE_PHOTO_INTAKE"), default=False
             ),
+            enable_text_intake=_as_bool(
+                os.getenv("ENABLE_TEXT_INTAKE"), default=True
+            ),
             photo_intake_model=os.getenv(
                 "PHOTO_INTAKE_MODEL", defaults.photo_intake_model
             ),
@@ -132,6 +138,10 @@ class Settings:
             maps_timeout_seconds=float(
                 os.getenv("MAPS_TIMEOUT_SECONDS", defaults.maps_timeout_seconds)
             ),
+            google_maps_browser_key=os.getenv("GOOGLE_MAPS_BROWSER_KEY", "").strip(),
+            google_maps_map_id=os.getenv(
+                "GOOGLE_MAPS_MAP_ID", defaults.google_maps_map_id
+            ).strip(),
             hold_minutes=int(os.getenv("HOLD_MINUTES", defaults.hold_minutes)),
             response_window_minutes=int(
                 os.getenv("RESPONSE_WINDOW_MINUTES", defaults.response_window_minutes)

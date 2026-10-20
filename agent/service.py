@@ -29,6 +29,7 @@ from .intake import (
     IntakeError,
     IntakeInterpreter,
     build_gemini_photo_provider,
+    build_gemini_text_provider,
 )
 from .locations import (
     LocationError,
@@ -282,8 +283,18 @@ photo_provider = (
     if settings.enable_photo_intake
     else None
 )
+text_intake_provider = (
+    build_gemini_text_provider(
+        project=settings.google_cloud_project,
+        location=settings.cloud_tasks_location,
+        model=settings.photo_intake_model,
+    )
+    if settings.enable_text_intake
+    else None
+)
 intake_interpreter = IntakeInterpreter(
     photo_provider=photo_provider,
+    text_provider=text_intake_provider,
     max_photo_bytes=settings.max_photo_bytes,
 )
 geocode_provider = (
@@ -350,15 +361,22 @@ app.add_middleware(
 def _harden_response(response: Response, request_id: str) -> Response:
     """Apply browser-facing security policy consistently, including errors."""
     response.headers["X-Request-ID"] = request_id
+    # Google Maps JavaScript API hosts, per Google's documented CSP allowlist.
+    maps = "https://*.googleapis.com https://*.gstatic.com https://*.google.com"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        f"default-src 'self'; script-src 'self' {maps} 'unsafe-eval'; "
+        f"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        f"img-src 'self' data: blob: {maps} https://*.ggpht.com https://*.googleusercontent.com; "
+        f"connect-src 'self' {maps} data: blob:; font-src 'self' https://fonts.gstatic.com; "
+        "worker-src blob:; frame-src https://*.google.com; object-src 'none'; "
         "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     )
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
+    # Origin only: Maps browser keys are restricted by referrer, and access
+    # tokens live in URL fragments, which browsers never send.
+    response.headers["Referrer-Policy"] = "strict-origin"
     response.headers["Permissions-Policy"] = (
         "geolocation=(self), microphone=(self), camera=()"
     )
@@ -601,6 +619,17 @@ async def _get_equity_audit() -> dict[str, Any]:
 @app.get("/healthz/", include_in_schema=False)
 async def health() -> dict[str, Any]:
     return {"status": "ok", "service": settings.app_name, "adk_available": root_agent is not None, "bigquery_mcp_enabled": settings.enable_bigquery_mcp}
+
+
+@app.get("/api/config", tags=["operations"])
+async def client_config() -> dict[str, Any]:
+    """Public browser configuration; the Maps key is referrer-restricted."""
+    return {
+        "maps": {
+            "browser_key": settings.google_maps_browser_key or None,
+            "map_id": settings.google_maps_map_id,
+        }
+    }
 
 
 @app.post("/api/demo/session", tags=["operations"])

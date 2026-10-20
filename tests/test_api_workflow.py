@@ -202,10 +202,24 @@ def test_browser_security_headers_are_applied_to_success_and_error(api):
     for response in (client.get("/healthz"), client.get("/readyz")):
         assert response.headers["x-frame-options"] == "DENY"
         assert response.headers["x-content-type-options"] == "nosniff"
-        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["referrer-policy"] == "strict-origin"
         assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+        assert "https://*.googleapis.com" in response.headers["content-security-policy"]
         assert response.headers["strict-transport-security"].startswith("max-age=")
         assert "geolocation=(self)" in response.headers["permissions-policy"]
+
+
+def test_client_config_exposes_only_the_browser_maps_settings(api, monkeypatch):
+    client, _, _ = api
+    assert client.get("/api/config").json()["maps"]["browser_key"] is None
+
+    monkeypatch.setattr(
+        service,
+        "settings",
+        replace(service.settings, google_maps_browser_key="browser-key"),
+    )
+    maps = client.get("/api/config").json()["maps"]
+    assert maps == {"browser_key": "browser-key", "map_id": service.settings.google_maps_map_id}
 
 
 def test_full_http_offer_hold_confirm_complete_and_role_authorization(api):
