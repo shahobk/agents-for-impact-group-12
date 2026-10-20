@@ -20,3 +20,7 @@ Thumbs.db
 data/*.csv
 data/*.parquet
 !data/profile_components.json
+
+# ADK local session cache & IDE settings
+.adk/
+.vscode/
