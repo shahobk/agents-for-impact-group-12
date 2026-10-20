@@ -1562,14 +1562,16 @@
   }
 
   function renderMissingContext(role) {
-    const recipient = role === "recipient";
+    if (role !== "recipient") {
+      // A donor without a live status link simply starts a new offer.
+      sessionStorage.removeItem(tokenKey("donor"));
+      state.token = "";
+      state.role = "donor";
+      history.replaceState(null, "", `${location.pathname}?role=donor`);
+      return renderDonorForm();
+    }
     const donorAvailable = Boolean(sessionStorage.getItem(tokenKey("donor")));
-    const eyebrow = recipient ? "Recipient demo" : "Donor status";
-    const heading = recipient ? "Open an inbox from the donor view." : "This private status link is not available in this tab.";
-    const copy = recipient
-      ? "Recipient inboxes open from the current notification wave so the right simulated partner is selected automatically."
-      : "Start a new rescue offer to create a fresh private status view.";
-    workspace.innerHTML = `${pageLead(eyebrow, heading, copy)}<section class="panel context-panel"><h2>${recipient && donorAvailable ? "Your active donor offer is ready." : "Start with the spinach rescue."}</h2><p>${recipient && donorAvailable ? "Return to the donor status and choose one of the current-wave recipient inboxes." : "The guided donor demo takes you from an editable offer to matched recipient inboxes."}</p><div class="button-row"><button id="open-donor-demo" class="button primary" type="button">${recipient && donorAvailable ? "Return to donor status" : "Open donor demo"}</button></div></section>`;
+    workspace.innerHTML = `<section class="panel context-panel"><h1>No offer to show yet.</h1><p>${donorAvailable ? "Open a food bank's inbox from your offer's Demo controls." : "Post an offer as a donor first; food banks are asked automatically."}</p><div class="button-row"><button id="open-donor-demo" class="button primary" type="button">${donorAvailable ? "Back to my offer" : "Post an offer"}</button></div></section>`;
     workspace.querySelector("#open-donor-demo").addEventListener("click", () => setRole("donor"));
   }
 

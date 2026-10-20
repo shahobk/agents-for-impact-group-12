@@ -261,6 +261,8 @@ form { margin: 0; }
 .proof-actions { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-top: 12px; color: var(--muted); font-size: .64rem; }
 
 .context-panel, .error-panel { max-width: 620px; margin: 0 auto; }
+.context-panel { margin-top: 48px; }
+.context-panel h1 { margin: 0 0 10px; font-family: Georgia, "Times New Roman", serif; font-size: 2rem; font-weight: 500; letter-spacing: -.03em; }
 .error-panel { margin-top: 60px; }
 .error-panel h1 { font-size: clamp(2rem, 5vw, 3.5rem); }
 .empty-state { display: grid; min-height: 280px; place-content: center; justify-items: center; text-align: center; }
