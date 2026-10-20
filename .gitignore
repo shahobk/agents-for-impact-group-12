@@ -25,3 +25,6 @@ data/*.parquet
 
 # Local planning, validation, and evidence.
 docs/
+
+# Claude Code agent worktrees
+.claude/
