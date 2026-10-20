@@ -23,8 +23,8 @@ data/*.csv
 data/*.parquet
 !data/profile_components.json
 
-# Local planning, validation, and evidence.
-docs/
+# Internal validation evidence.
+docs/evidence/
 
 # Claude Code agent worktrees
 .claude/

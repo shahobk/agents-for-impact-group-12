@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#153a30" />
+    <meta name="description" content="Interactive architecture explorer for Pantry Relay." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23165d48'/%3E%3Cpath d='M8 17c5-9 12-7 16-11-1 11-6 18-16 11Z' fill='%23d7e77f'/%3E%3C/svg%3E" />
+    <title>Pantry Relay — Architecture Explorer</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#explorer">Skip to architecture explorer</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Pantry Relay architecture home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>Pantry Relay</span>
+        <small>Architecture explorer</small>
+      </a>
+      <div class="header-actions">
+        <span class="review-badge">Hackathon review</span>
+        <a href="../../../frontend/index.html">Open product demo <span aria-hidden="true">↗</span></a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="orientation" aria-labelledby="page-title">
+        <div class="orientation-copy">
+          <p class="eyebrow">Atlanta grocery rescue broker</p>
+          <h1 id="page-title">Architecture, from conversation to safe handoff.</h1>
+          <p>Pantry Relay now starts with a review-first AI intake, then passes confirmed facts through agent-orchestrated matching and transactional workflow controls. Explore what happens, who decides, and where state lives.</p>
+        </div>
+        <aside class="principle" aria-label="Core design principle">
+          <span>Core boundary</span>
+          <strong>AI proposes. People confirm.<br />Code authorizes.</strong>
+          <p>Inferred offer facts stay editable; eligibility, capacity, claims, and state transitions remain deterministic.</p>
+        </aside>
+      </section>
+
+      <section class="facts" aria-label="Core operating facts">
+        <div><strong>30</strong><span>retrieved candidates</span></div>
+        <div><strong>≤ 3</strong><span>recipients per wave</span></div>
+        <div><strong>10 min</strong><span>protected claim hold</span></div>
+        <div><strong>1</strong><span>authoritative workflow</span></div>
+      </section>
+
+      <section class="explorer" id="explorer" aria-labelledby="explorer-title">
+        <div class="explorer-header">
+          <div>
+            <p class="eyebrow">Interactive system view</p>
+            <h2 id="explorer-title">Explore the architecture</h2>
+          </div>
+          <div class="current-view-badge"><i class="status-dot live"></i>Current implementation</div>
+        </div>
+
+        <div class="view-tabs" role="tablist" aria-label="Architecture views">
+          <button id="tab-map" role="tab" type="button" data-view="map" aria-controls="view-panel" aria-selected="true"><span>01</span> System map</button>
+          <button id="tab-flow" role="tab" type="button" data-view="flow" aria-controls="view-panel" aria-selected="false"><span>02</span> Request flow</button>
+          <button id="tab-authority" role="tab" type="button" data-view="authority" aria-controls="view-panel" aria-selected="false"><span>03</span> Decision ownership</button>
+        </div>
+
+        <div id="view-panel" role="tabpanel" aria-labelledby="tab-map">
+          <div class="map-toolbar" id="map-toolbar">
+            <div class="focus-control" role="group" aria-label="Focus architecture path">
+              <span>Focus</span>
+              <button type="button" data-focus="overview" aria-pressed="true">Overview</button>
+              <button type="button" data-focus="matching" aria-pressed="false">Matching</button>
+              <button type="button" data-focus="handoff" aria-pressed="false">Handoff</button>
+              <button type="button" data-focus="trust" aria-pressed="false">Trust</button>
+            </div>
+            <div class="legend" aria-label="Status legend">
+              <span><i class="status-dot live"></i>Implemented</span>
+              <span><i class="status-dot progress"></i>In progress</span>
+              <span><i class="status-dot next"></i>Next</span>
+            </div>
+          </div>
+
+          <div class="workspace">
+            <article class="canvas-card">
+              <div class="canvas-header">
+                <div class="breadcrumb" id="breadcrumb" aria-label="Architecture breadcrumb"></div>
+                <p id="canvas-summary">Major runtime components and their authority boundaries.</p>
+              </div>
+              <div class="map-stage" id="map-stage" aria-label="Interactive architecture diagram">
+                <svg id="connections" aria-hidden="true">
+                  <defs>
+                    <marker id="arrow-muted" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker>
+                    <marker id="arrow-active" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker>
+                  </defs>
+                </svg>
+                <div class="node-grid" id="node-grid"></div>
+              </div>
+              <p class="canvas-hint"><span aria-hidden="true">↳</span> Select a component for details. Use “Explore internals” only when you need implementation depth.</p>
+            </article>
+            <aside class="inspector" id="inspector" aria-live="polite"></aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="takeaway" aria-labelledby="takeaway-title">
+        <div>
+          <p class="eyebrow">Architecture takeaway</p>
+          <h2 id="takeaway-title">Conversational at the edge.<br />Strict at the center.</h2>
+        </div>
+        <div class="takeaway-points">
+          <p><span>01</span><strong>Review-first intake</strong>Gemini suggests structured facts; the donor edits and confirms them.</p>
+          <p><span>02</span><strong>Explainable eligibility</strong>BigQuery finds candidates; deterministic rules decide who qualifies.</p>
+          <p><span>03</span><strong>Transactional handoff</strong>Firestore-backed commands make claims atomic and retries harmless.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Pantry Relay architecture companion</span>
+      <span>Atlanta grocery rescue pilot</span>
+      <a href="#top">Back to top ↑</a>
+    </footer>
+  </body>
+</html>
