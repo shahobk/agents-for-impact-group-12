@@ -236,10 +236,6 @@ form { margin: 0; }
 .workflow-routes span, .workflow-routes strong { font-size: .68rem; }
 .workflow-routes small { grid-column: 1 / -1; color: #aebdb6; font-size: .58rem; }
 .workflow-map-card > p { margin: 0; padding: 0 18px 16px; color: #aebdb6; font-size: .63rem; }
-.metric-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
-.metric-strip > div { display: grid; padding: 18px; background: var(--ink); border-radius: 14px; color: white; }
-.metric-strip strong { color: var(--lime); font-family: Georgia, serif; font-size: 2rem; font-weight: 500; }
-.metric-strip span { color: #bdcac4; font-size: .67rem; font-weight: 760; text-transform: uppercase; }
 
 .equity-proof { margin-bottom: 18px; }
 .equity-proof .section-heading { align-items: center; }
@@ -303,7 +299,6 @@ footer p { margin: 0; }
   .section-heading { gap: 12px; }
   .form-grid, .fact-grid.compact-facts { grid-template-columns: 1fr; gap: 0; }
   .fact-grid, .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metric-strip > div:last-child { grid-column: 1 / -1; }
   .proof-metrics { grid-template-columns: repeat(2, 1fr); }
   .proof-metrics > div:nth-child(2) { border-right: 0; }
   .proof-metrics > div:nth-child(-n + 2) { border-bottom: 1px solid rgb(255 255 255 / 10%); }

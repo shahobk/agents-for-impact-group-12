@@ -1,1 +1,149 @@
 /* coordinator view styles. Loaded after styles.css. */
+
+/* Header: title, one-line impact, and the chat entry point. */
+.ops-shell { padding: 40px 0 10px; }
+.ops-head { display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; }
+.ops-head h1 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(2.1rem, 5vw, 3.2rem); font-weight: 500; letter-spacing: -.05em; line-height: 1; }
+.ops-metrics { margin: 8px 0 0; color: var(--muted); font-size: .8rem; }
+.ops-metrics strong { color: var(--ink); font-weight: 800; }
+.ops-chat-toggle { padding: 10px 15px; font-size: .78rem; }
+.ops-chat-toggle[aria-expanded="true"] { color: white; background: var(--green); }
+.ops-chat-toggle:focus-visible { outline: 3px solid #a7bd42; outline-offset: 2px; }
+
+/* Tabs: quiet segmented control. */
+.ops-tabs { display: inline-flex; gap: 4px; margin-bottom: 16px; padding: 4px; background: rgb(255 253 248 / 72%); border: 1px solid var(--line); border-radius: 12px; }
+.ops-tabs [role="tab"] { display: inline-flex; gap: 7px; align-items: center; padding: 8px 14px; color: var(--muted); background: transparent; border: 0; border-radius: 9px; cursor: pointer; font-size: .78rem; font-weight: 780; white-space: nowrap; }
+.ops-tabs [role="tab"][aria-selected="true"] { color: var(--ink); background: #eff4da; box-shadow: inset 0 0 0 1px #c9d68f; }
+.ops-tabs [role="tab"]:focus-visible { outline: 3px solid #a7bd42; outline-offset: 2px; }
+.ops-count { min-width: 20px; padding: 1px 7px; color: var(--muted); background: var(--surface-2); border-radius: 99px; font-size: .66rem; text-align: center; }
+.ops-count.hot { color: white; background: var(--red); }
+.ops-panel:focus { outline: 0; }
+
+/* Board: list on the left, the chosen offer on the right. */
+.ops-board { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(0, 1.15fr); gap: 18px; align-items: start; }
+.ops-board:has(#ops-detail:empty) { grid-template-columns: minmax(0, 640px); }
+.ops-detail-slot:empty { display: none; }
+.ops-list { position: sticky; top: 16px; }
+.ops-rows { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ops-row { display: flex; gap: 10px; align-items: center; padding: 6px 10px 6px 6px; background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 14px; }
+.ops-row.tone-danger { border-left-color: var(--red); }
+.ops-row.tone-warn { border-left-color: #d9a441; }
+.ops-row.active { background: #f6f8ea; border-color: #b6c866; box-shadow: 0 6px 20px rgb(34 52 45 / 7%); }
+.ops-row.active.tone-danger { border-left-color: var(--red); }
+.ops-row.active.tone-warn { border-left-color: #d9a441; }
+.ops-row-main { display: grid; flex: 1; gap: 2px; min-width: 0; padding: 8px; color: var(--ink); background: transparent; border: 0; border-radius: 10px; cursor: pointer; text-align: left; }
+.ops-row-main:focus-visible, .ops-primary:focus-visible, .ops-more summary:focus-visible, .ops-menu-item:focus-visible, .ops-unfit summary:focus-visible, .ops-timeline summary:focus-visible, .ops-chat-close:focus-visible { outline: 3px solid #a7bd42; outline-offset: 2px; }
+.ops-row-title { font-size: .9rem; font-weight: 800; }
+.ops-row-text { color: var(--ink); font-size: .78rem; }
+.ops-row-main small { overflow: hidden; color: var(--muted); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
+.ops-row .status-pill { flex: none; }
+.ops-primary { flex: none; white-space: nowrap; }
+.ops-primary.option span { color: var(--green); }
+.ops-healthy { display: flex; gap: 8px; align-items: center; margin: 14px 4px 0; color: var(--muted); font-size: .76rem; font-weight: 700; }
+.ops-healthy span { width: 8px; height: 8px; background: var(--green); border-radius: 50%; box-shadow: 0 0 0 4px rgb(20 95 69 / 12%); }
+.ops-clear { padding: 30px 26px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.ops-clear h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 1.6rem; font-weight: 500; letter-spacing: -.03em; }
+.ops-clear p { margin: 8px 0 0; color: var(--muted); font-size: .8rem; }
+.ops-clear .ops-healthy { margin: 12px 0 0; }
+
+/* Offer detail. */
+.ops-detail { display: grid; gap: 14px; padding: clamp(20px, 3vw, 30px); background: rgb(255 253 248 / 94%); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+.ops-detail-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+.ops-detail-head .kicker { margin: 0; }
+.ops-detail h2 { margin: -6px 0 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(1.4rem, 3vw, 1.9rem); font-weight: 500; letter-spacing: -.035em; line-height: 1.1; }
+.ops-summary { margin: -4px 0 0; color: var(--muted); font-size: .8rem; }
+.ops-callout { margin: 0; padding: 11px 13px; border-radius: 11px; font-size: .8rem; }
+.ops-callout.tone-danger { color: #7d2b27; background: var(--red-bg); }
+.ops-callout.tone-warn { color: #68420c; background: var(--amber-bg); }
+.ops-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ops-actions .button.primary { padding: 11px 18px; font-size: .8rem; }
+.ops-more { position: relative; }
+.ops-more summary { display: inline-flex; padding: 9px 13px; color: var(--muted); background: white; border: 1px solid var(--line); border-radius: 99px; cursor: pointer; font-size: .76rem; font-weight: 780; list-style: none; }
+.ops-more summary::-webkit-details-marker { display: none; }
+.ops-more[open] summary { color: var(--ink); border-color: #b6c866; }
+.ops-menu { position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; display: grid; min-width: 220px; padding: 6px; background: white; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.ops-menu-item { padding: 9px 11px; color: var(--ink); background: transparent; border: 0; border-radius: 8px; cursor: pointer; font-size: .78rem; font-weight: 700; text-align: left; }
+.ops-menu-item:hover { background: #eff4da; }
+.ops-menu-item.danger { color: var(--red); }
+.ops-menu-item.danger:hover { background: var(--red-bg); }
+.ops-menu-item:disabled { cursor: wait; opacity: .6; }
+.ops-reason-form { padding: 12px; background: var(--surface-2); border-radius: 12px; }
+.ops-reason-form label { display: block; margin-bottom: 8px; font-size: .82rem; font-weight: 780; }
+.ops-reason-form .question-input { flex-wrap: wrap; }
+.ops-reason-form input { min-width: 180px; background: white; }
+
+.ops-recipients h3 { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin: 6px 0 8px; font-size: .9rem; }
+.ops-recipients h3 small { color: var(--muted); font-size: .7rem; font-weight: 650; }
+.ops-people { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ops-people li { display: flex; gap: 10px; align-items: flex-start; }
+.ops-people li > div { display: grid; gap: 1px; min-width: 0; }
+.ops-people strong { font-size: .8rem; }
+.ops-people small { color: var(--muted); font-size: .72rem; }
+.ops-mark { display: grid; flex: none; width: 22px; height: 22px; place-content: center; color: var(--green); background: #e2efd9; border-radius: 50%; font-size: .68rem; font-weight: 900; }
+.ops-people .good .ops-mark { color: white; background: var(--green); }
+.ops-people .out .ops-mark { color: var(--muted); background: var(--surface-2); }
+.ops-people .unfit .ops-mark { color: var(--red); background: var(--red-bg); }
+.ops-unfit, .ops-timeline { margin-top: 10px; }
+.ops-unfit summary, .ops-timeline summary { padding: 4px 0; color: var(--green-dark); cursor: pointer; font-size: .78rem; font-weight: 780; }
+.ops-unfit .ops-people { margin-top: 8px; }
+.ops-timeline { margin-top: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.ops-timeline .timeline { margin-top: 10px; }
+.ops-detail .workflow-map-card { box-shadow: none; }
+.ops-detail .workflow-map, .ops-detail .workflow-map.google-map { min-height: 0; height: 220px; }
+
+/* Audit tab keeps the full equity proof; drop the panel's outer margin. */
+.ops-panel .equity-proof { margin-bottom: 0; }
+
+/* Chat: compact floating panel on desktop, full-height sheet on phones. */
+.ops-chat { position: fixed; z-index: 25; right: 20px; bottom: 20px; display: flex; flex-direction: column; width: min(400px, calc(100vw - 40px)); height: min(600px, calc(100vh - 40px)); overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 24px 70px rgb(22 50 41 / 22%); }
+.ops-chat-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; color: white; background: var(--ink); }
+.ops-chat-head h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 1.15rem; font-weight: 500; letter-spacing: -.02em; }
+.ops-chat-close { width: 32px; height: 32px; color: white; background: rgb(255 255 255 / 10%); border: 0; border-radius: 50%; cursor: pointer; font-size: 1.1rem; line-height: 1; }
+.ops-chat-log { display: flex; flex: 1; flex-direction: column; gap: 10px; overflow-y: auto; padding: 16px; }
+.ops-chat-log:empty::before { margin: auto 0 0; color: var(--muted); content: "Ask about any offer in the queue. Pantry Relay sees the same data you do."; font-size: .78rem; }
+.ops-bubble { max-width: 88%; padding: 10px 13px; border-radius: 16px; font-size: .82rem; line-height: 1.45; overflow-wrap: anywhere; }
+.ops-bubble p { margin: 0; }
+.ops-bubble p + p, .ops-bubble p + ul, .ops-bubble p + ol, .ops-bubble ul + p, .ops-bubble ol + p { margin-top: 7px; }
+.ops-bubble ul, .ops-bubble ol { margin: 0; padding-left: 18px; }
+.ops-bubble li + li { margin-top: 3px; }
+.ops-bubble code { padding: 1px 4px; background: rgb(0 0 0 / 6%); border-radius: 4px; font-size: .9em; }
+.ops-bubble small { display: block; margin-top: 6px; color: var(--muted); font-size: .64rem; }
+.ops-bubble.user { align-self: flex-end; color: white; background: var(--green); border-bottom-right-radius: 5px; }
+.ops-bubble.agent { align-self: flex-start; background: #eff4da; border-bottom-left-radius: 5px; }
+.ops-bubble.agent.error { color: #68420c; background: var(--amber-bg); }
+.ops-typing { display: inline-flex; gap: 4px; padding: 13px 15px; }
+.ops-typing i { width: 7px; height: 7px; background: var(--green); border-radius: 50%; animation: ops-typing 1s ease-in-out infinite; }
+.ops-typing i:nth-child(2) { animation-delay: .15s; }
+.ops-typing i:nth-child(3) { animation-delay: .3s; }
+@keyframes ops-typing { 0%, 80%, 100% { opacity: .3; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+.ops-chat-suggest { padding: 0 16px 10px; }
+.ops-chat-suggest:empty { display: none; }
+.ops-chat-suggest .option { text-align: left; }
+.ops-chat-form { padding: 10px 12px 12px; border-top: 1px solid var(--line); }
+.ops-chat-context { overflow: hidden; margin: 0 4px 7px; color: var(--muted); font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
+.ops-chat-context:empty { display: none; }
+.ops-chat-input { display: flex; gap: 8px; align-items: flex-end; }
+.ops-chat-input textarea { flex: 1; min-height: 42px; max-height: 140px; padding: 10px 12px; color: var(--ink); background: white; border: 1px solid #cbc8bf; border-radius: 12px; outline: 0; font-size: .84rem; resize: none; }
+.ops-chat-input textarea:focus-visible { border-color: var(--green); box-shadow: 0 0 0 3px rgb(20 95 69 / 15%); }
+.ops-chat-input .button { min-height: 42px; }
+
+.ops-recovery { max-width: 620px; margin: 60px auto 0; }
+.ops-recovery h1 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(2.1rem, 5vw, 3.2rem); font-weight: 500; letter-spacing: -.05em; }
+.ops-recovery p { color: var(--muted); }
+
+@media (max-width: 850px) {
+  .ops-board, .ops-board:has(#ops-detail:empty) { grid-template-columns: 1fr; }
+  .ops-list { position: static; }
+}
+@media (max-width: 620px) {
+  .ops-shell { padding-top: 26px; }
+  .ops-head { align-items: flex-start; }
+  .ops-tabs { display: flex; width: 100%; }
+  .ops-tabs [role="tab"] { flex: 1; justify-content: center; padding-inline: 6px; }
+  .ops-row { flex-wrap: wrap; padding: 6px; }
+  .ops-row-main { flex-basis: 100%; }
+  .ops-row .ops-primary { width: 100%; margin: 0 2px 4px; }
+  .ops-row .status-pill { margin: 0 0 6px 8px; }
+  .ops-chat { inset: 0; width: 100%; height: 100%; height: 100dvh; border: 0; border-radius: 0; }
+  .ops-menu { right: auto; left: 0; }
+}
