@@ -13,6 +13,9 @@ from typing import Any
 
 PhotoProvider = Callable[[bytes, str, str], Awaitable[Mapping[str, Any]]]
 TextProvider = Callable[[str, datetime], Awaitable[Mapping[str, Any]]]
+# (reply text, now, offer deadline or None) -> {"draft", "confidence", "warnings"}
+HandoffProvider = Callable[[str, datetime, datetime | None], Awaitable[Mapping[str, Any]]]
+HANDOFF_FIELDS = ("contact_name", "contact_phone", "expected_handoff_time")
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DRAFT_FIELDS = (
     "description",
@@ -313,11 +316,43 @@ class IntakeInterpreter:
         *,
         photo_provider: PhotoProvider | None = None,
         text_provider: TextProvider | None = None,
+        handoff_provider: HandoffProvider | None = None,
         max_photo_bytes: int = 5 * 1024 * 1024,
     ) -> None:
         self.photo_provider = photo_provider
         self.text_provider = text_provider
+        self.handoff_provider = handoff_provider
         self.max_photo_bytes = max_photo_bytes
+
+    async def extract_handoff(
+        self,
+        *,
+        text: str,
+        deadline: datetime | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Read a recipient's free-text pickup reply into confirmation suggestions.
+
+        The language model reads first; the deterministic reader only runs when
+        the model is not configured or fails. Nothing is confirmed here.
+        """
+        at = now or datetime.now(timezone.utc)
+        if at.tzinfo is None:
+            raise IntakeError("invalid_now", "now must include a timezone offset.")
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            raise IntakeError("empty_handoff", "Tell us who is picking up, when, and a phone number.")
+        if self.handoff_provider is not None:
+            try:
+                value = await self.handoff_provider(normalized, at, deadline)
+                return _handoff_result(value, at, deadline, provider="gemini")
+            except Exception:
+                fallback = deterministic_handoff(normalized, now=at, deadline=deadline)
+                fallback["warnings"].insert(
+                    0, "The assistant was unavailable; a simpler reader filled this in."
+                )
+                return fallback
+        return deterministic_handoff(normalized, now=at, deadline=deadline)
 
     async def extract(
         self,
@@ -494,11 +529,279 @@ def build_gemini_photo_provider(
     return provider
 
 
+# --- Recipient pickup reply ("Maria, around 6:30, 404-555-0182") -------------
+
+_PHONE = re.compile(r"(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b")
+_TIME_WORDS = re.compile(
+    r"\b(?:around|about|at|by|in|before|after|today|tonight|tomorrow|noon|am|pm|"
+    r"hours?|hrs?|minutes?|mins?|asap|now|soon|call|text|phone|number|cell)\b",
+    re.IGNORECASE,
+)
+_NAME_LEADS = re.compile(
+    r"^(?:this is|it's|it is|i'm|i am|we'll send|sending|contact(?: is)?|name(?: is)?)\s+",
+    re.IGNORECASE,
+)
+_NAME_TAILS = re.compile(
+    r"\s+(?:will|can|is|'ll)\b.*$|\s+(?:picking|coming|driving|grabbing)\b.*$",
+    re.IGNORECASE,
+)
+
+
+def _blank_handoff() -> dict[str, Any]:
+    return {field: None for field in HANDOFF_FIELDS}
+
+
+def _clean_phone(value: Any) -> str | None:
+    text = " ".join(str(value or "").split())[:80]
+    return text if len(re.sub(r"\D", "", text)) >= 7 else None
+
+
+def _clean_name(value: Any) -> str | None:
+    text = " ".join(str(value or "").split()).strip(" ,.;:-")[:200]
+    return text or None
+
+
+def _resolve_clock(
+    now: datetime, deadline: datetime | None, hour: int, minute: int, meridiem: str | None
+) -> datetime | None:
+    if not (0 <= hour <= 23 and 0 <= minute < 60):
+        return None
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hours = [hour % 12 + (12 if meridiem.startswith("p") else 0)]
+    elif hour > 12 or hour == 0:
+        hours = [hour]
+    else:
+        # "around 6:30" is whichever 6:30 comes next; prefer one before the deadline.
+        hours = [hour % 12, hour % 12 + 12]
+    candidates = sorted(_next_clock_time(now, h, minute) for h in hours)
+    if deadline is not None:
+        in_window = [c for c in candidates if c <= deadline]
+        if in_window:
+            return in_window[0]
+    return candidates[0]
+
+
+def deterministic_handoff(
+    text: str, *, now: datetime, deadline: datetime | None = None
+) -> dict[str, Any]:
+    """Offline fallback: a conservative reading of name, phone, and time."""
+    normalized = " ".join(text.split()).strip()
+    draft = _blank_handoff()
+    rest = normalized
+    phone = _PHONE.search(rest)
+    if phone:
+        draft["contact_phone"] = _clean_phone(phone.group(0))
+        rest = (rest[: phone.start()] + " , " + rest[phone.end():]).strip()
+    lower = rest.lower()
+
+    handoff: datetime | None = None
+    relative = re.search(
+        r"\bin\s+(?:(an?|half an|\d+(?:\.\d+)?)\s*)(hours?|hrs?|minutes?|mins?)\b", lower
+    )
+    if relative:
+        amount_text, unit = relative.groups()
+        amount = {"a": 1.0, "an": 1.0, "half an": 0.5}.get(amount_text) or float(amount_text)
+        minutes = amount * (60 if unit.startswith("h") else 1)
+        handoff = now + timedelta(minutes=minutes)
+        rest = rest[: relative.start()] + " , " + rest[relative.end():]
+    elif re.search(r"\bnoon\b", lower):
+        handoff = _next_clock_time(now, 12)
+        rest = re.sub(r"(?i)\b(?:around |at |by )?noon\b", " , ", rest)
+    else:
+        # A bare number is not a time; it needs "around/at/by", a colon, or am/pm.
+        clock = next(
+            (
+                match
+                for match in re.finditer(
+                    r"(?:\b(around|about|at|by)\s+|~\s*)?\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?(?=\W|$)",
+                    lower,
+                )
+                if match.group(1) or match.group(3) or match.group(4)
+            ),
+            None,
+        )
+        if clock:
+            meridiem = (clock.group(4) or "").replace(".", "") or None
+            handoff = _resolve_clock(
+                now, deadline, int(clock.group(2)), int(clock.group(3) or 0), meridiem
+            )
+            rest = rest[: clock.start()] + " , " + rest[clock.end():]
+    if handoff is not None:
+        draft["expected_handoff_time"] = _iso(handoff)
+
+    for segment in re.split(r"[,;\n]| - ", rest):
+        candidate = _NAME_TAILS.sub("", _NAME_LEADS.sub("", segment.strip()))
+        if (
+            re.fullmatch(r"[A-Za-z][A-Za-z.'\- ]{0,60}", candidate)
+            and not _TIME_WORDS.search(candidate)
+            and len(candidate.split()) <= 4
+        ):
+            draft["contact_name"] = _clean_name(candidate)
+            break
+    return _handoff_result(
+        {"draft": draft, "confidence": {}}, now, deadline, provider="deterministic_fallback"
+    )
+
+
+def _round_minutes(value: datetime, *, up: bool, step: int = 5) -> datetime:
+    base = value.replace(second=0, microsecond=0)
+    extra = base.minute % step
+    if not extra:
+        return base
+    return base + timedelta(minutes=step - extra) if up else base - timedelta(minutes=extra)
+
+
+def _handoff_question(
+    field: str,
+    now: datetime,
+    deadline: datetime | None,
+    problem: str = "",
+    guess: str | None = None,
+) -> dict[str, Any]:
+    if field == "contact_name":
+        return {"field": field, "prompt": "Who's picking it up?", "kind": "text", "options": []}
+    if field == "contact_phone":
+        return {"field": field, "prompt": "What number can the donor call?", "kind": "text", "options": []}
+    options = []
+    if guess:
+        options.append(_option(f"Yes, {_clock_label(datetime.fromisoformat(guess), now)}", guess))
+    for minutes, label in ((30, "In 30 min"), (60, "In 1 hour"), (120, "In 2 hours")):
+        at = _round_minutes(now + timedelta(minutes=minutes), up=True)
+        if deadline is None or at <= deadline:
+            options.append(_option(label, _iso(at)))
+    if deadline is not None and deadline - now > timedelta(minutes=20):
+        latest = _round_minutes(deadline - timedelta(minutes=10), up=False)
+        last = datetime.fromisoformat(options[-1]["value"]) if options else now
+        if latest > last + timedelta(minutes=20):
+            options.append(_option(f"By {_clock_label(latest, now)}", _iso(latest)))
+    if guess:
+        prompt = f"Did you mean {_clock_label(datetime.fromisoformat(guess), now)}?"
+    else:
+        prompt = problem or "When will you get there?"
+    return {"field": field, "prompt": prompt, "kind": "choice", "options": options}
+
+
+def _handoff_result(
+    provider_value: Mapping[str, Any],
+    now: datetime,
+    deadline: datetime | None,
+    *,
+    provider: str,
+) -> dict[str, Any]:
+    raw = provider_value.get("draft", provider_value)
+    raw = raw if isinstance(raw, Mapping) else {}
+    draft = _blank_handoff()
+    draft["contact_name"] = _clean_name(raw.get("contact_name"))
+    draft["contact_phone"] = _clean_phone(raw.get("contact_phone"))
+    warnings = [str(item)[:300] for item in provider_value.get("warnings", []) or [] if item]
+    problem = ""
+    if raw.get("expected_handoff_time"):
+        try:
+            parsed = datetime.fromisoformat(str(raw["expected_handoff_time"]).replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None:
+            label = _clock_label(parsed, now)
+            if parsed <= now:
+                problem = f"{label.capitalize()} has already passed. When will you get there?"
+            elif deadline is not None and parsed > deadline:
+                problem = (
+                    f"{label.capitalize()} is after the food has to be gone "
+                    f"({_clock_label(deadline, now)}). When can you get there?"
+                )
+            else:
+                draft["expected_handoff_time"] = _iso(parsed)
+    if problem:
+        warnings.insert(0, problem)
+    raw_confidence = provider_value.get("confidence")
+    raw_confidence = raw_confidence if isinstance(raw_confidence, Mapping) else {}
+    filled = [field for field in HANDOFF_FIELDS if draft[field]]
+    confidence = {field: "low" if raw_confidence.get(field) == "low" else "high" for field in filled}
+    questions = [
+        _handoff_question(
+            field,
+            now,
+            deadline,
+            problem if field == "expected_handoff_time" else "",
+            guess=draft[field] if field == "expected_handoff_time" else None,
+        )
+        for field in HANDOFF_FIELDS
+        if not draft[field] or confidence.get(field) == "low"
+    ]
+    return {
+        "draft": draft,
+        "confidence": confidence,
+        "missing_fields": [field for field in HANDOFF_FIELDS if not draft[field]],
+        "questions": questions,
+        "warnings": warnings,
+        "provider": provider,
+        "retained": False,
+        "review_required": True,
+    }
+
+
+def _handoff_instructions(now: datetime, deadline: datetime | None) -> str:
+    local_now = _atlanta_time(now)
+    window = (
+        f"The food must be picked up by {_atlanta_time(deadline).isoformat()}. "
+        if deadline is not None
+        else ""
+    )
+    return (
+        "A food pantry is replying to a food-rescue offer with who will pick it up, when, and "
+        "a phone number. Return JSON only, shaped as "
+        "{\"draft\": {\"contact_name\": ..., \"contact_phone\": ..., \"expected_handoff_time\": ...}, "
+        "\"confidence\": {...}, \"warnings\": [...]}. "
+        "contact_name is the person picking up (just the name). contact_phone is the phone number "
+        "as written. expected_handoff_time is ISO 8601 with offset. "
+        f"The pantry's local time is {local_now.isoformat()} ({local_now.strftime('%A')}, Atlanta). "
+        f"{window}"
+        "Resolve relative or partial times such as \"around 6:30\", \"in an hour\", or \"after "
+        "lunch\" against that local time; when am/pm is not said, choose the next occurrence, "
+        "preferring one before the pickup deadline. "
+        "confidence maps each filled field to \"high\" when stated and \"low\" when you had to "
+        "guess. A time like \"around 6:30\" counts as stated (high) when only one reading falls "
+        "between now and the pickup deadline; approximate words like \"around\" do not lower it. "
+        "Use null for anything not stated. Never invent a name, number, or time."
+    )
+
+
+def build_gemini_handoff_provider(
+    *, project: str | None, location: str, model: str
+) -> HandoffProvider | None:
+    if not project:
+        return None
+
+    async def provider(text: str, now: datetime, deadline: datetime | None) -> Mapping[str, Any]:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=[
+                types.Part.from_text(
+                    text=f"{_handoff_instructions(now, deadline)}\n\nPantry reply: {text[:1000]}"
+                ),
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json", temperature=0
+            ),
+        )
+        return json.loads((response.text or "{}").strip())
+
+    return provider
+
+
 __all__ = [
     "ALLOWED_IMAGE_TYPES",
     "IntakeError",
     "IntakeInterpreter",
+    "build_gemini_handoff_provider",
     "build_gemini_photo_provider",
     "build_gemini_text_provider",
+    "deterministic_handoff",
     "deterministic_interpret",
 ]

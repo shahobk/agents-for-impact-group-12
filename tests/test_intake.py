@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agent.intake import IntakeError, IntakeInterpreter, deterministic_interpret
+from agent.intake import (
+    IntakeError,
+    IntakeInterpreter,
+    deterministic_handoff,
+    deterministic_interpret,
+)
 
 
 NOW = datetime(2026, 10, 20, 16, 0, tzinfo=timezone.utc)
@@ -195,3 +200,117 @@ def test_deterministic_fallback_reads_clock_deadline_in_atlanta_time_and_asks_th
         "In 4 hours",
         "By 8 pm today",
     ]
+
+
+DEADLINE = datetime(2026, 10, 21, 0, 0, tzinfo=timezone.utc)  # 8 pm in Atlanta
+
+
+def test_handoff_reply_goes_to_language_model_first_with_the_deadline():
+    seen = {}
+
+    async def handoff_provider(text, now, deadline):
+        seen.update(text=text, now=now, deadline=deadline)
+        return {
+            "draft": {
+                "contact_name": "Maria",
+                "contact_phone": "404-555-0182",
+                "expected_handoff_time": "2026-10-20T18:30:00-04:00",
+                "pickup_address": "should be dropped",
+            },
+            "confidence": {"expected_handoff_time": "high"},
+        }
+
+    result = asyncio.run(
+        IntakeInterpreter(handoff_provider=handoff_provider).extract_handoff(
+            text="  Maria, around 6:30,  404-555-0182 ", deadline=DEADLINE, now=NOW
+        )
+    )
+
+    assert seen == {"text": "Maria, around 6:30, 404-555-0182", "now": NOW, "deadline": DEADLINE}
+    assert result["provider"] == "gemini"
+    assert result["draft"] == {
+        "contact_name": "Maria",
+        "contact_phone": "404-555-0182",
+        "expected_handoff_time": "2026-10-20T22:30:00+00:00",
+    }
+    assert result["questions"] == []
+    assert result["retained"] is False
+
+
+def test_handoff_time_after_the_deadline_becomes_a_follow_up_question():
+    async def handoff_provider(text, now, deadline):
+        return {"draft": {"contact_name": "Sam", "expected_handoff_time": "2026-10-21T01:00:00Z"}}
+
+    result = asyncio.run(
+        IntakeInterpreter(handoff_provider=handoff_provider).extract_handoff(
+            text="Sam at 9pm", deadline=DEADLINE, now=NOW
+        )
+    )
+
+    assert result["draft"]["expected_handoff_time"] is None
+    asked = {question["field"]: question for question in result["questions"]}
+    assert set(asked) == {"contact_phone", "expected_handoff_time"}
+    time_question = asked["expected_handoff_time"]
+    assert "after the food has to be gone (8 pm today)" in time_question["prompt"]
+    assert [option["label"] for option in time_question["options"]] == [
+        "In 30 min",
+        "In 1 hour",
+        "In 2 hours",
+        "By 7:50 pm today",
+    ]
+    assert all(
+        NOW < datetime.fromisoformat(option["value"]) <= DEADLINE
+        for option in time_question["options"]
+    )
+
+
+def test_guessed_handoff_time_is_offered_back_as_a_one_tap_confirmation():
+    async def handoff_provider(text, now, deadline):
+        return {
+            "draft": {"contact_name": "Maria", "contact_phone": "404-555-0182", "expected_handoff_time": "2026-10-20T22:30:00Z"},
+            "confidence": {"expected_handoff_time": "low"},
+        }
+
+    result = asyncio.run(
+        IntakeInterpreter(handoff_provider=handoff_provider).extract_handoff(
+            text="Maria after lunch-ish, 404-555-0182", deadline=DEADLINE, now=NOW
+        )
+    )
+
+    assert result["draft"]["expected_handoff_time"] == "2026-10-20T22:30:00+00:00"
+    assert result["confidence"]["expected_handoff_time"] == "low"
+    [question] = result["questions"]
+    assert question["prompt"] == "Did you mean 6:30 pm today?"
+    assert question["options"][0] == {"label": "Yes, 6:30 pm today", "value": "2026-10-20T22:30:00+00:00"}
+
+
+def test_handoff_model_failure_falls_back_to_deterministic_reading():
+    async def handoff_provider(text, now, deadline):
+        raise RuntimeError("model unavailable")
+
+    result = asyncio.run(
+        IntakeInterpreter(handoff_provider=handoff_provider).extract_handoff(
+            text="Maria, around 6:30, 404-555-0182", deadline=DEADLINE, now=NOW
+        )
+    )
+
+    assert result["provider"] == "deterministic_fallback"
+    assert "assistant was unavailable" in result["warnings"][0]
+    # "around 6:30" without am/pm resolves to the next 6:30 before the deadline.
+    assert result["draft"] == {
+        "contact_name": "Maria",
+        "contact_phone": "404-555-0182",
+        "expected_handoff_time": "2026-10-20T22:30:00+00:00",
+    }
+
+
+def test_deterministic_handoff_reads_relative_times_and_asks_for_the_rest():
+    result = deterministic_handoff("This is James Lee, we can be there in an hour", now=NOW)
+
+    assert result["draft"]["contact_name"] == "James Lee"
+    assert result["draft"]["expected_handoff_time"] == "2026-10-20T17:00:00+00:00"
+    assert [question["field"] for question in result["questions"]] == ["contact_phone"]
+
+    with pytest.raises(IntakeError) as empty:
+        asyncio.run(IntakeInterpreter().extract_handoff(text="   ", now=NOW))
+    assert empty.value.code == "empty_handoff"
