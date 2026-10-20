@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import re
@@ -12,6 +12,7 @@ import secrets
 import threading
 import time
 from typing import Any, Literal, Mapping
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
@@ -328,6 +329,7 @@ _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _equity_cache: dict[str, Any] = {}
 _equity_cache_lock = asyncio.Lock()
 _EQUITY_CACHE_SECONDS = 30 * 60
+_DEMO_SESSION_COOKIE = "pantry_relay_demo_session"
 
 
 app = FastAPI(
@@ -438,6 +440,35 @@ def _bearer(authorization: str | None) -> str | None:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     return authorization.split(None, 1)[1]
+
+
+def _authenticate_coordinator_request(
+    request: Request, authorization: str | None
+) -> dict[str, str]:
+    """Accept an explicit bearer, or a demo-only same-origin session cookie."""
+    bearer = _bearer(authorization)
+    if bearer:
+        return token_authority.authenticate_coordinator(bearer)
+    if not settings.demo_mode:
+        return token_authority.authenticate_coordinator(None)
+
+    session = request.cookies.get(_DEMO_SESSION_COOKIE)
+    actor = token_authority.authenticate_coordinator_session(session)
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        host = request.headers.get("host", "").lower()
+        parsed = urlsplit(origin) if origin else None
+        if (
+            parsed is None
+            or parsed.scheme not in {"http", "https"}
+            or parsed.netloc.lower() != host
+        ):
+            raise AuthorizationError(
+                "demo_session_origin_mismatch",
+                "Demo coordinator actions require a same-origin request.",
+                status_code=403,
+            )
+    return actor
 
 
 def _idempotency(value: str | None) -> str:
@@ -570,6 +601,32 @@ async def _get_equity_audit() -> dict[str, Any]:
 @app.get("/healthz/", include_in_schema=False)
 async def health() -> dict[str, Any]:
     return {"status": "ok", "service": settings.app_name, "adk_available": root_agent is not None, "bigquery_mcp_enabled": settings.enable_bigquery_mcp}
+
+
+@app.post("/api/demo/session", tags=["operations"])
+async def create_demo_session(request: Request, response: Response) -> dict[str, Any]:
+    """Create the demo coordinator session without exposing any shared secret."""
+    if not settings.demo_mode:
+        raise HTTPException(status_code=404, detail="Demo sessions are disabled.")
+    ttl_seconds = settings.demo_session_ttl_seconds
+    session = token_authority.issue_coordinator_session(
+        ttl=timedelta(seconds=ttl_seconds)
+    )
+    response.set_cookie(
+        key=_DEMO_SESSION_COOKIE,
+        value=session,
+        max_age=ttl_seconds,
+        httponly=True,
+        secure=settings.repository_backend == "firestore"
+        or request.url.scheme == "https",
+        samesite="strict",
+        path="/api/ops",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "role": "coordinator",
+        "expires_in_seconds": ttl_seconds,
+    }
 
 
 @app.get("/readyz", tags=["operations"])
@@ -733,30 +790,30 @@ async def advance_offer_task(request: AdvanceTaskRequest, authorization: str | N
 
 
 @app.get("/api/ops/offers", tags=["operations"])
-async def ops_offers(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-    token_authority.authenticate_coordinator(_bearer(authorization))
+async def ops_offers(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _authenticate_coordinator_request(request, authorization)
     return workflow.ops_offers()
 
 
 @app.get("/api/ops/equity-audit", tags=["operations"])
-async def equity_audit(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-    token_authority.authenticate_coordinator(_bearer(authorization))
+async def equity_audit(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _authenticate_coordinator_request(request, authorization)
     return await _get_equity_audit()
 
 
 @app.post("/api/ops/ask", tags=["operations"])
-async def ops_ask(request: AgentRunRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-    token_authority.authenticate_coordinator(_bearer(authorization))
+async def ops_ask(body: AgentRunRequest, request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _authenticate_coordinator_request(request, authorization)
     try:
-        return await run_root_agent(request.prompt, user_id="pantry-relay-coordinator")
+        return await run_root_agent(body.prompt, user_id="pantry-relay-coordinator")
     except AgentRuntimeUnavailable as exc:
         raise HTTPException(status_code=503, detail="The ADK runtime is unavailable.") from exc
 
 
 @app.post("/api/ops/offers/{offer_id}/{action}", tags=["operations"])
-async def ops_offer_action(offer_id: str, action: str, request: OpsActionRequest, authorization: str | None = Header(default=None), x_idempotency_key: str | None = Header(default=None)) -> dict[str, Any]:
-    token_authority.authenticate_coordinator(_bearer(authorization))
-    return workflow.ops_action(offer_id, action, request.model_dump(exclude_none=True), idempotency_key=_idempotency(x_idempotency_key))
+async def ops_offer_action(offer_id: str, action: str, body: OpsActionRequest, request: Request, authorization: str | None = Header(default=None), x_idempotency_key: str | None = Header(default=None)) -> dict[str, Any]:
+    _authenticate_coordinator_request(request, authorization)
+    return workflow.ops_action(offer_id, action, body.model_dump(exclude_none=True), idempotency_key=_idempotency(x_idempotency_key))
 
 
 frontend_dir = Path(__file__).resolve().parents[1] / "frontend"

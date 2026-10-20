@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -70,6 +71,130 @@ def test_ready_is_protected_and_dependency_aware(api):
     assert response.json()["dependencies"]["photo_intake"]["probe"] == "provider_configuration_only"
     assert response.json()["dependencies"]["geocoding"]["ok"] is True
     assert response.json()["dependencies"]["routes"]["ok"] is True
+
+
+def test_demo_session_cookie_authorizes_only_coordinator_routes(api):
+    _client, _, _ = api
+    client = TestClient(service.app, base_url="https://testserver")
+
+    issued = client.post("/api/demo/session")
+    assert issued.status_code == 200
+    assert issued.json() == {
+        "role": "coordinator",
+        "expires_in_seconds": service.settings.demo_session_ttl_seconds,
+    }
+    assert "ops-token" not in issued.text
+    cookie = issued.headers["set-cookie"].lower()
+    assert "httponly" in cookie
+    assert "secure" in cookie
+    assert "samesite=strict" in cookie
+    assert "path=/api/ops" in cookie
+    assert issued.headers["cache-control"] == "no-store"
+
+    assert client.get("/api/ops/offers").status_code == 200
+    # The cookie path cannot authorize donor or recipient routes.
+    assert client.get("/api/offers/status").status_code == 401
+    assert client.get("/api/recipients/notifications").status_code == 401
+
+
+def test_demo_session_cookie_supports_http_local_development(api):
+    _client, _, _ = api
+    client = TestClient(service.app, base_url="http://testserver")
+    issued = client.post("/api/demo/session")
+    assert issued.status_code == 200
+    assert "secure" not in issued.headers["set-cookie"].lower()
+    assert client.get("/api/ops/offers").status_code == 200
+
+
+def test_demo_session_cookie_is_secure_for_firestore_deployment(api, monkeypatch):
+    _client, _, _ = api
+    monkeypatch.setattr(
+        service,
+        "settings",
+        replace(service.settings, repository_backend="firestore"),
+    )
+    client = TestClient(service.app, base_url="http://testserver")
+    issued = client.post("/api/demo/session")
+    assert issued.status_code == 200
+    assert "secure" in issued.headers["set-cookie"].lower()
+
+
+def test_demo_cookie_actions_require_same_origin_and_bearer_still_works(api):
+    _client, _, _ = api
+    client = TestClient(service.app, base_url="https://testserver")
+    client.post("/api/demo/session")
+    created = client.post(
+        "/api/offers",
+        json=payload(),
+        headers={"X-Idempotency-Key": "demo-session-action"},
+    ).json()
+
+    action_url = f"/api/ops/offers/{created['offer_id']}/cancel"
+    denied = client.post(action_url, json={})
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "demo_session_origin_mismatch"
+
+    allowed = client.post(
+        action_url,
+        json={},
+        headers={"Origin": "https://testserver"},
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["status"] == "cancelled"
+
+    bearer = client.get(
+        "/api/ops/offers", headers={"Authorization": "Bearer ops-token"}
+    )
+    assert bearer.status_code == 200
+
+
+def test_demo_cookie_authorizes_equity_and_same_origin_ask(api, monkeypatch):
+    _client, _, _ = api
+
+    async def fake_equity():
+        return {"postings": [], "count": 0}
+
+    async def fake_agent(prompt, *, user_id):
+        return {"text": prompt, "user_id": user_id}
+
+    monkeypatch.setattr(service, "_get_equity_audit", fake_equity)
+    monkeypatch.setattr(service, "run_root_agent", fake_agent)
+    client = TestClient(service.app, base_url="https://testserver")
+    client.post("/api/demo/session")
+
+    assert client.get("/api/ops/equity-audit").json() == {
+        "postings": [],
+        "count": 0,
+    }
+    asked = client.post(
+        "/api/ops/ask",
+        json={"prompt": "Explain the active rescue"},
+        headers={"Origin": "https://testserver"},
+    )
+    assert asked.status_code == 200
+    assert asked.json()["user_id"] == "pantry-relay-coordinator"
+
+
+def test_demo_session_is_disabled_outside_demo_mode(api, monkeypatch):
+    _client, _, _ = api
+    authority = service.token_authority
+    client = TestClient(service.app, base_url="https://testserver")
+    session = authority.issue_coordinator_session()
+    client.cookies.set(
+        service._DEMO_SESSION_COOKIE,
+        session,
+        domain="testserver.local",
+        path="/api/ops",
+    )
+    monkeypatch.setattr(
+        service, "settings", replace(service.settings, demo_mode=False)
+    )
+
+    assert client.post("/api/demo/session").status_code == 404
+    assert client.get("/api/ops/offers").status_code == 401
+    assert client.get(
+        "/api/ops/offers", headers={"Authorization": "Bearer ops-token"}
+    ).status_code == 200
 
 
 def test_browser_security_headers_are_applied_to_success_and_error(api):

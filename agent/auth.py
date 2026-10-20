@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
 import hashlib
 import hmac
 import secrets
 import base64
+import binascii
 from typing import Any
 
 
@@ -134,6 +136,97 @@ class TokenAuthority:
             raise AuthorizationError(
                 "invalid_coordinator_token",
                 "A valid coordinator bearer token is required.",
+            )
+        return {"actor_type": "coordinator", "actor_id": "demo-coordinator"}
+
+    def issue_coordinator_session(
+        self,
+        *,
+        ttl: timedelta = timedelta(minutes=15),
+        now: datetime | None = None,
+    ) -> str:
+        """Issue a short-lived, stateless coordinator cookie value.
+
+        The payload contains no coordinator secret. Its HMAC uses a distinct
+        domain prefix so these signatures cannot be reused as opaque tokens.
+        """
+        issued_at = now or utc_now()
+        payload = {
+            "aud": "pantry-relay-demo",
+            "exp": int((issued_at + ttl).timestamp()),
+            "iat": int(issued_at.timestamp()),
+            "scope": "coordinator",
+            "v": 1,
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).rstrip(b"=").decode("ascii")
+        signing_input = f"v1.{encoded}"
+        signature = hmac.new(
+            self.pepper.encode("utf-8"),
+            f"demo-session:{signing_input}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"{signing_input}.{signature}"
+
+    def authenticate_coordinator_session(
+        self,
+        raw_session: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, str]:
+        if not raw_session:
+            raise AuthorizationError(
+                "missing_demo_session", "A coordinator session is required."
+            )
+        try:
+            version, encoded, supplied_signature = raw_session.split(".", 2)
+        except ValueError as exc:
+            raise AuthorizationError(
+                "invalid_demo_session", "The coordinator session is invalid."
+            ) from exc
+        signing_input = f"{version}.{encoded}"
+        expected_signature = hmac.new(
+            self.pepper.encode("utf-8"),
+            f"demo-session:{signing_input}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if version != "v1" or not hmac.compare_digest(
+            supplied_signature, expected_signature
+        ):
+            raise AuthorizationError(
+                "invalid_demo_session", "The coordinator session is invalid."
+            )
+        try:
+            padding = "=" * (-len(encoded) % 4)
+            payload = json.loads(
+                base64.urlsafe_b64decode(encoded + padding).decode("utf-8")
+            )
+            if not isinstance(payload, dict):
+                raise ValueError("session payload must be an object")
+            expires_at = int(payload["exp"])
+        except (
+            binascii.Error,
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise AuthorizationError(
+                "invalid_demo_session", "The coordinator session is invalid."
+            ) from exc
+        if payload.get("aud") != "pantry-relay-demo" or payload.get("scope") != "coordinator":
+            raise AuthorizationError(
+                "insufficient_demo_session_scope",
+                "The demo session does not permit coordinator access.",
+                status_code=403,
+            )
+        if expires_at <= int((now or utc_now()).timestamp()):
+            raise AuthorizationError(
+                "expired_demo_session", "The coordinator session has expired."
             )
         return {"actor_type": "coordinator", "actor_id": "demo-coordinator"}
 

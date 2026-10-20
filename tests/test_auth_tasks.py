@@ -1,4 +1,8 @@
+import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import json
 
 import pytest
 
@@ -43,6 +47,47 @@ def test_opaque_token_scope_expiry_and_raw_secret_not_stored():
     with pytest.raises(AuthorizationError) as expired:
         authority.authenticate(state, raw, action="offer:claim", offer_id="o1", now=NOW + timedelta(minutes=5))
     assert expired.value.code == "expired_bearer_token"
+
+
+def test_demo_coordinator_session_expiry_tamper_and_scope():
+    authority = TokenAuthority("pepper", "coordinator")
+    session = authority.issue_coordinator_session(
+        ttl=timedelta(minutes=5), now=NOW
+    )
+
+    assert authority.authenticate_coordinator_session(session, now=NOW) == {
+        "actor_type": "coordinator",
+        "actor_id": "demo-coordinator",
+    }
+    with pytest.raises(AuthorizationError) as expired:
+        authority.authenticate_coordinator_session(
+            session, now=NOW + timedelta(minutes=5)
+        )
+    assert expired.value.code == "expired_demo_session"
+
+    with pytest.raises(AuthorizationError) as tampered:
+        authority.authenticate_coordinator_session(session[:-1] + "0", now=NOW)
+    assert tampered.value.code == "invalid_demo_session"
+
+    version, encoded, _signature = session.split(".", 2)
+    padding = "=" * (-len(encoded) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+    payload["scope"] = "recipient"
+    scoped_encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).rstrip(b"=").decode()
+    signing_input = f"{version}.{scoped_encoded}"
+    signature = hmac.new(
+        b"pepper",
+        f"demo-session:{signing_input}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    with pytest.raises(AuthorizationError) as scope:
+        authority.authenticate_coordinator_session(
+            f"{signing_input}.{signature}", now=NOW
+        )
+    assert scope.value.code == "insufficient_demo_session_scope"
+    assert scope.value.status_code == 403
 
 
 def test_in_memory_tasks_are_deterministic_and_already_exists_is_success():

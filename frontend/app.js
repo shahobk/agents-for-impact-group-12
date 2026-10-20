@@ -26,6 +26,7 @@
     publicSummary: null,
     commandKeys: new Map(),
     equityAudit: null,
+    coordinatorSession: "idle",
   };
 
   captureFragmentToken();
@@ -46,7 +47,7 @@
     const raw = fragment.get("token");
     if (raw) {
       const tokenRole = state.role === "status" ? "donor" : state.role;
-      sessionStorage.setItem(tokenKey(tokenRole), raw);
+      if (tokenRole !== "ops") sessionStorage.setItem(tokenKey(tokenRole), raw);
       history.replaceState(null, "", `${location.pathname}${location.search}`);
     }
   }
@@ -62,7 +63,13 @@
     state.data = null;
     state.selectedOfferId = "";
     state.reservation = null;
-    state.token = sessionStorage.getItem(tokenKey(state.role)) || "";
+    if (state.role === "ops") {
+      sessionStorage.removeItem(tokenKey("ops"));
+      state.token = "";
+      state.coordinatorSession = "idle";
+    } else {
+      state.token = sessionStorage.getItem(tokenKey(state.role)) || "";
+    }
     if (state.role === "donor" && state.token) state.role = "status";
     if (updateUrl) {
       const queryRole = state.role === "status" ? "status" : state.role;
@@ -451,7 +458,7 @@
     error.hidden = true;
     try {
       const result = await api("/api/offers", { method: "POST", body: payload, mutation: true, token: null });
-      if (!result.status_token) throw new Error("The offer was created without a donor status token.");
+      if (!result.status_token) throw new Error("The offer was created without a private status link. Please retry.");
       sessionStorage.setItem(tokenKey("donor"), result.status_token);
       state.token = result.status_token;
       state.demoRecipients = Array.isArray(result.recipient_access) ? result.recipient_access : [];
@@ -469,7 +476,7 @@
   }
 
   function renderDonorStatus() {
-    if (!state.token) return renderTokenGate("donor", "Open private donor status", "Paste the opaque status token from your confirmation link.");
+    if (!state.token) return renderMissingContext("donor");
     workspace.innerHTML = loadingView("Loading donor status…");
     loadDonorStatus();
   }
@@ -485,6 +492,7 @@
       const status = offerOf(state.data).status;
       if (!TERMINAL.has(status)) startPolling(loadDonorStatus);
     } catch (err) {
+      if (isAuthError(err)) return recoverMissingContext("donor");
       renderLoadError("Could not load this private offer", err, () => clearToken("donor"));
     }
   }
@@ -527,7 +535,7 @@
     const currentIds = new Set(candidates.filter((item) => item.wave === currentWave && item.notification_status === "sent").map((item) => item.recipient_id));
     const currentAccess = access.filter((item) => currentIds.has(item.recipient_id));
     const visible = currentAccess.length ? currentAccess : access.slice(0, 3);
-    return `<div class="demo-access"><p class="kicker">Current-wave demo sessions</p>${visible.map((item, index) => `<button class="button secondary wide demo-recipient" data-index="${access.indexOf(item)}" type="button">Open ${e(item.name || item.recipient_id || `recipient ${index + 1}`)} <span aria-hidden="true">↗</span></button>`).join("")}<small>Demo authorization links are opened without printing their opaque token.</small></div>`;
+    return `<div class="demo-access"><p class="kicker">Current-wave demo inboxes</p>${visible.map((item, index) => `<button class="button secondary wide demo-recipient" data-index="${access.indexOf(item)}" type="button">Open ${e(item.name || item.recipient_id || `recipient ${index + 1}`)} <span aria-hidden="true">↗</span></button>`).join("")}<small>Each button opens the selected simulated recipient inbox directly.</small></div>`;
   }
 
   function bindDemoRecipientButtons() {
@@ -540,7 +548,7 @@
   }
 
   function renderRecipient() {
-    if (!state.token) return renderTokenGate("recipient", "Open simulated recipient inbox", "Use a scoped link from the donor confirmation or paste a recipient demo token.");
+    if (!state.token) return renderMissingContext("recipient");
     workspace.innerHTML = loadingView("Loading simulated inbox…");
     loadRecipient();
   }
@@ -553,6 +561,7 @@
       drawRecipient();
       if (!notices.length || notices.some((item) => !TERMINAL.has(item.offer?.status || item.status))) startPolling(loadRecipient);
     } catch (err) {
+      if (isAuthError(err)) return recoverMissingContext("recipient");
       renderLoadError("Could not load this recipient inbox", err, () => clearToken("recipient"));
     }
   }
@@ -667,10 +676,21 @@
     });
   }
 
-  function renderCoordinator() {
-    if (!state.token) return renderTokenGate("ops", "Open coordinator operations", "Enter the separate coordinator demo bearer token.");
-    workspace.innerHTML = loadingView("Loading operations queue…");
-    loadCoordinator();
+  async function renderCoordinator() {
+    state.token = "";
+    sessionStorage.removeItem(tokenKey("ops"));
+    workspace.innerHTML = loadingView("Opening coordinator demo…");
+    try {
+      await api("/api/demo/session", { method: "POST", token: null });
+      if (state.role !== "ops") return;
+      state.coordinatorSession = "ready";
+      workspace.innerHTML = loadingView("Loading operations queue…");
+      await loadCoordinator();
+    } catch (err) {
+      if (state.role !== "ops") return;
+      state.coordinatorSession = "idle";
+      renderCoordinatorRecovery(err);
+    }
   }
 
   async function loadCoordinator() {
@@ -682,7 +702,12 @@
       if (!state.equityAudit) loadEquityAudit();
       if (offers.some((offer) => !TERMINAL.has(offer.status))) startPolling(loadCoordinator);
     } catch (err) {
-      renderLoadError("Could not load coordinator operations", err, () => clearToken("ops"));
+      if (isAuthError(err)) {
+        state.coordinatorSession = "idle";
+        renderCoordinatorRecovery(err);
+      } else {
+        renderLoadError("Could not load coordinator operations", err, renderCoordinator);
+      }
     }
   }
 
@@ -702,14 +727,14 @@
     const impact = state.data.impact || {};
     const current = offers.find((offer) => (offer.offer_id || offer.id) === state.selectedOfferId) || offers[0];
     workspace.innerHTML = `
-      ${pageLead("Coordinator operations", "Keep every rescue safe, explainable, and moving.", "Demo authorization only — this is not production identity or recipient onboarding.")}
+      ${pageLead("Coordinator operations", "Keep every rescue safe, explainable, and moving.", "Shared demo operations — this is not production identity or recipient onboarding.")}
       <section class="metric-strip" aria-label="Completed impact"><div><strong>${e(impact.completed_offers ?? 0)}</strong><span>completed rescues</span></div><div><strong>${e(formatNumber(impact.completed_quantity_pallets ?? 0))}</strong><span>pallets moved</span></div><div><strong>${e(offers.filter((o) => !TERMINAL.has(o.status)).length)}</strong><span>active offers</span></div></section>
       ${equityProof(state.equityAudit)}
       <div class="ops-layout">
-        <section class="panel ops-queue"><div class="section-heading"><div><p class="kicker">Shared queue</p><h2>${offers.length} offer${offers.length === 1 ? "" : "s"}</h2></div><button id="leave-ops" class="button quiet" type="button">Lock view</button></div>${offers.length ? offers.map(opsCard).join("") : emptyState("Queue is clear", "New donor offers will appear here.")}</section>
+        <section class="panel ops-queue"><div class="section-heading"><div><p class="kicker">Shared queue</p><h2>${offers.length} offer${offers.length === 1 ? "" : "s"}</h2></div><button id="leave-ops" class="button quiet" type="button">Back to donor demo</button></div>${offers.length ? offers.map(opsCard).join("") : emptyState("Queue is clear", "New donor offers will appear here.")}</section>
         <section class="panel ops-detail">${current ? coordinatorDetail(current) : emptyState("Choose an offer", "Select a queue item to inspect its timeline and actions.")}</section>
       </div>`;
-    workspace.querySelector("#leave-ops").addEventListener("click", () => clearToken("ops"));
+    workspace.querySelector("#leave-ops").addEventListener("click", () => setRole("donor"));
     workspace.querySelector("#refresh-equity")?.addEventListener("click", loadEquityAudit);
     workspace.querySelectorAll(".ops-card").forEach((button) => button.addEventListener("click", () => { state.selectedOfferId = button.dataset.offerId; drawCoordinator(); }));
     workspace.querySelectorAll("[data-ops-action]").forEach((button) => button.addEventListener("click", () => runOpsAction(button, current)));
@@ -793,17 +818,31 @@
     await mutateButton(button, `/api/ops/offers/${encodeURIComponent(id)}/${action}`, { reason }, () => { showToast(action === "expire" ? "Due-state advancement requested." : `Offer action recorded: ${action}.`); loadCoordinator(); });
   }
 
-  function renderTokenGate(role, heading, copy) {
-    workspace.innerHTML = `${pageLead(role === "ops" ? "Coordinator access" : role === "recipient" ? "Recipient access" : "Donor access", heading, copy)}<section class="panel token-panel"><form id="token-form"><div class="field"><label for="access-token">Opaque access token</label><input id="access-token" name="token" type="password" autocomplete="off" required /><small>The token is removed from shared links after reading and sent only in the Authorization header.</small></div><button class="button primary wide" type="submit">Open scoped view</button></form></section>`;
-    workspace.querySelector("#token-form").addEventListener("submit", (event) => {
-      event.preventDefault();
-      const raw = String(new FormData(event.currentTarget).get("token") || "").trim();
-      if (!raw) return;
-      sessionStorage.setItem(tokenKey(role), raw);
-      state.token = raw;
-      state.role = role === "donor" ? "status" : role;
-      render();
-    });
+  function renderMissingContext(role) {
+    const recipient = role === "recipient";
+    const donorAvailable = Boolean(sessionStorage.getItem(tokenKey("donor")));
+    const eyebrow = recipient ? "Recipient demo" : "Donor status";
+    const heading = recipient ? "Open an inbox from the donor view." : "This private status link is not available in this tab.";
+    const copy = recipient
+      ? "Recipient inboxes open from the current notification wave so the right simulated partner is selected automatically."
+      : "Start a new rescue offer to create a fresh private status view.";
+    workspace.innerHTML = `${pageLead(eyebrow, heading, copy)}<section class="panel context-panel"><h2>${recipient && donorAvailable ? "Your active donor offer is ready." : "Start with the spinach rescue."}</h2><p>${recipient && donorAvailable ? "Return to the donor status and choose one of the current-wave recipient inboxes." : "The guided donor demo takes you from an editable offer to matched recipient inboxes."}</p><div class="button-row"><button id="open-donor-demo" class="button primary" type="button">${recipient && donorAvailable ? "Return to donor status" : "Open donor demo"}</button></div></section>`;
+    workspace.querySelector("#open-donor-demo").addEventListener("click", () => setRole("donor"));
+  }
+
+  function recoverMissingContext(role) {
+    sessionStorage.removeItem(tokenKey(role));
+    state.token = "";
+    renderMissingContext(role);
+  }
+
+  function renderCoordinatorRecovery(err) {
+    const copy = isAuthError(err)
+      ? "The demo session ended. Reopen it to continue with the shared operations queue."
+      : "The coordinator demo could not start. Check the connection and try again.";
+    workspace.innerHTML = `${pageLead("Coordinator demo", "The operations view is temporarily unavailable.", copy)}<section class="panel context-panel"><h2>No sign-in is needed for this demo.</h2><p>Reopening creates a short-lived browser session and then loads the shared queue.</p><div class="button-row"><button id="retry-coordinator" class="button primary" type="button">Reopen coordinator demo</button><button id="coordinator-to-donor" class="button secondary" type="button">Back to donor demo</button></div></section>`;
+    workspace.querySelector("#retry-coordinator").addEventListener("click", renderCoordinator);
+    workspace.querySelector("#coordinator-to-donor").addEventListener("click", () => setRole("donor"));
   }
 
   function clearToken(role, nextRole = role) {
@@ -865,9 +904,10 @@
 
   function renderLoadError(titleText, err, reset) {
     stopPolling();
-    workspace.innerHTML = `<section class="panel error-panel"><p class="kicker">Access or connection issue</p><h1>${e(titleText)}</h1><p>${e(errorMessage(err))}</p><div class="button-row"><button id="retry-load" class="button primary" type="button">Try again</button><button id="reset-token" class="button secondary" type="button">Use another token</button></div></section>`;
+    const message = isAuthError(err) ? "This private demo link is no longer active." : errorMessage(err);
+    workspace.innerHTML = `<section class="panel error-panel"><p class="kicker">Demo connection issue</p><h1>${e(titleText)}</h1><p>${e(message)}</p><div class="button-row"><button id="retry-load" class="button primary" type="button">Try again</button><button id="restart-demo" class="button secondary" type="button">Restart demo</button></div></section>`;
     workspace.querySelector("#retry-load").addEventListener("click", render);
-    workspace.querySelector("#reset-token").addEventListener("click", reset);
+    workspace.querySelector("#restart-demo").addEventListener("click", reset);
   }
 
   let currentLoader = null;
@@ -935,7 +975,7 @@
       if (!state.commandKeys.has(commandId)) state.commandKeys.set(commandId, crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
       headers["X-Idempotency-Key"] = state.commandKeys.get(commandId);
     }
-    const response = await fetch(path, { method: options.method || "GET", headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
+    const response = await fetch(path, { method: options.method || "GET", headers, credentials: "same-origin", body: options.body === undefined ? undefined : JSON.stringify(options.body) });
     let result = {};
     try { result = await response.json(); } catch (_err) { /* handled below */ }
     if (!response.ok) {
@@ -952,6 +992,10 @@
 
   function commandIdentity(method, path, body) {
     return `${method}:${path}:${stableJson(body)}`;
+  }
+
+  function isAuthError(err) {
+    return err?.status === 401 || err?.status === 403;
   }
 
   function stableJson(value) {

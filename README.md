@@ -35,7 +35,7 @@ pip install -r requirements.txt
 
 Open <http://127.0.0.1:8000/?role=donor>. Local defaults use the in-memory
 workflow repository and scheduler, credential-free demo candidates when cloud
-matching is unavailable, and demo authorization. They are intentionally not
+matching is unavailable, and automatic demo sessions. They are intentionally not
 evidence of durable cloud behavior.
 
 Role instructions:
@@ -46,15 +46,14 @@ Role instructions:
 2. **Recipient:** use one of the current-wave demo-session buttons returned
    after donor submission. Accept temporarily, confirm within the countdown,
    then record completion.
-3. **Coordinator:** switch to **Coordinator** and enter the separately managed
-   coordinator demo bearer token. Inspect the shared queue, deterministic
-   candidate audit, timeline, impact, and controlled recovery actions. Never
-   publish the token in documentation or a URL.
+3. **Coordinator:** switch to **Coordinator**. The shared queue opens
+   automatically so you can inspect the candidate audit, timeline, impact, and
+   controlled recovery actions.
 
-Donor and recipient access links carry opaque tokens in the URL fragment
-(`/?role=recipient#token=...`). The SPA reads the token, immediately removes the
-fragment, and sends it only in the `Authorization: Bearer` header. Mutation
-requests also use idempotency keys. Raw tokens are not displayed in the UI.
+The demo requires no account, sign-in, token entry, or copied access codes.
+Private donor and recipient context is established automatically by the guided
+flow, and Coordinator uses a short-lived secure browser session. Mutation
+requests remain idempotent.
 
 Run verification with:
 
@@ -63,7 +62,7 @@ Run verification with:
 node --check frontend/app.js
 ```
 
-At the current checkpoint, all 72 Python tests pass. The installed Playwright
+At the current checkpoint, all 79 Python tests pass. The installed Playwright
 CLI completed the deployed spinach submission, a simultaneous two-recipient
 claim race with one winner, refresh-safe confirmation, completion, donor
 polling, coordinator impact, mobile layout, keyboard map selection, and the
@@ -103,7 +102,7 @@ the local `docs/` working directory stays intentionally gitignored.
   10/10 approximate nearest-tract evidence records
 - Browser race: one claim returned `200`; the competing qualified claim
   returned `409`; confirmation and completion returned `200`
-- Latest local suite: `72 passed`; the only warning is an upstream
+- Latest local suite: `79 passed`; the only warning is an upstream
   `google-genai` Python 3.14 deprecation warning
 
 ### What is real, simulated, and approximate

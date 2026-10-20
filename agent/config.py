@@ -34,6 +34,7 @@ class Settings:
     coordinator_token: str = "demo-coordinator-token"
     token_pepper: str = "local-development-only"
     demo_mode: bool = True
+    demo_session_ttl_seconds: int = 15 * 60
     workflow_matcher_enabled: bool = True
     workflow_demo_fallback: bool = True
     enable_photo_intake: bool = False
@@ -95,6 +96,18 @@ class Settings:
             ).strip(),
             token_pepper=os.getenv("TOKEN_PEPPER", defaults.token_pepper).strip(),
             demo_mode=_as_bool(os.getenv("DEMO_MODE"), default=True),
+            demo_session_ttl_seconds=max(
+                60,
+                min(
+                    60 * 60,
+                    int(
+                        os.getenv(
+                            "DEMO_SESSION_TTL_SECONDS",
+                            defaults.demo_session_ttl_seconds,
+                        )
+                    ),
+                ),
+            ),
             workflow_matcher_enabled=_as_bool(
                 os.getenv("WORKFLOW_MATCHER_ENABLED"), default=True
             ),
