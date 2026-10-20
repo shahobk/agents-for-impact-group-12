@@ -1,0 +1,12 @@
+.git
+.gitignore
+.pytest_cache
+.venv
+__pycache__
+*.py[cod]
+*.ipynb
+data
+docs
+notebooks
+scripts
+tests

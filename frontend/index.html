@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5f1e8" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='10' fill='%23176b4d'/%3E%3Cpath d='M8 17c5-9 12-7 16-11-1 11-6 18-16 11Z' fill='%23c9dc74'/%3E%3C/svg%3E" />
+    <meta
+      name="description"
+      content="Match Atlanta grocery surplus with a safe, ready recipient."
+    />
+    <title>Pantry Relay | Atlanta grocery rescue</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#offer-form">Skip to offer form</a>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="Pantry Relay home">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span>Pantry Relay</span>
+      </a>
+      <div class="header-meta">
+        <span class="pulse-dot" aria-hidden="true"></span>
+        <span>Atlanta pilot</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">Fast, explainable grocery rescue</p>
+        <h1 id="page-title">Turn surplus into a safe handoff.</h1>
+        <p>
+          Describe what needs a home. We check fit, cold storage, capacity, travel time,
+          and deadline—then give you one clear call to make.
+        </p>
+      </section>
+
+      <div class="workspace">
+        <section class="panel offer-panel" aria-labelledby="offer-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="step-label">01 · Offer</p>
+              <h2 id="offer-heading">What can you donate?</h2>
+            </div>
+            <button class="text-button" id="load-demo" type="button">Load spinach demo</button>
+          </div>
+
+          <form id="offer-form">
+            <div class="field field-full">
+              <label for="description">Food description</label>
+              <textarea
+                id="description"
+                name="description"
+                rows="3"
+                required
+                placeholder="e.g. 10 crates of fresh spinach"
+              ></textarea>
+              <span class="field-hint">Include food type, packaging, and any dietary notes.</span>
+            </div>
+
+            <div class="form-grid">
+              <div class="field">
+                <label for="quantity">Quantity / pallet estimate</label>
+                <div class="input-with-suffix">
+                  <input
+                    id="quantity"
+                    name="quantity"
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    inputmode="decimal"
+                    required
+                    placeholder="1"
+                  />
+                  <span>pallets</span>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="deadline">Pickup deadline</label>
+                <input id="deadline" name="deadline" type="datetime-local" required />
+              </div>
+            </div>
+
+            <fieldset class="field field-full choice-group">
+              <legend>Storage state</legend>
+              <div class="segmented-control">
+                <label>
+                  <input type="radio" name="storage_state" value="refrigerated" checked />
+                  <span>Refrigerated</span>
+                </label>
+                <label>
+                  <input type="radio" name="storage_state" value="frozen" />
+                  <span>Frozen</span>
+                </label>
+                <label>
+                  <input type="radio" name="storage_state" value="ambient" />
+                  <span>Ambient</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <div class="field field-full">
+              <label for="location">Pickup location</label>
+              <input
+                id="location"
+                name="location"
+                type="text"
+                autocomplete="street-address"
+                required
+                placeholder="Store or street address"
+              />
+            </div>
+
+            <div class="form-grid coordinates">
+              <div class="field">
+                <label for="latitude">Donor latitude</label>
+                <input
+                  id="latitude"
+                  name="latitude"
+                  type="number"
+                  min="-90"
+                  max="90"
+                  step="any"
+                  inputmode="decimal"
+                  required
+                  placeholder="33.749"
+                />
+              </div>
+              <div class="field">
+                <label for="longitude">Donor longitude</label>
+                <input
+                  id="longitude"
+                  name="longitude"
+                  type="number"
+                  min="-180"
+                  max="180"
+                  step="any"
+                  inputmode="decimal"
+                  required
+                  placeholder="-84.388"
+                />
+              </div>
+            </div>
+
+            <label class="check-row" for="split-allowed">
+              <input id="split-allowed" name="split_allowed" type="checkbox" />
+              <span>
+                <strong>Split this donation if needed</strong>
+                <small>Allow the matcher to consider more than one recipient.</small>
+              </span>
+            </label>
+
+            <button class="primary-button" id="submit-button" type="submit">
+              <span>Find the best handoff</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6" />
+              </svg>
+            </button>
+          </form>
+        </section>
+
+        <section class="panel result-panel" aria-labelledby="result-heading">
+          <div class="panel-heading result-heading-row">
+            <div>
+              <p class="step-label">02 · Recommendation</p>
+              <h2 id="result-heading">Your best next call</h2>
+            </div>
+            <span id="result-status" class="status-chip">Waiting for offer</span>
+          </div>
+
+          <div id="result-region" aria-live="polite" aria-atomic="true">
+            <div class="empty-state">
+              <div class="route-illustration" aria-hidden="true">
+                <span class="route-node route-start"></span>
+                <span class="route-line"></span>
+                <span class="route-node route-end"></span>
+              </div>
+              <h3>A match you can explain</h3>
+              <p>
+                Submit an offer to see one selected recipient, two fallbacks, constraint checks,
+                and ready-to-send outreach.
+              </p>
+              <ul class="empty-checks" aria-label="Checks performed">
+                <li>Storage</li>
+                <li>Capacity</li>
+                <li>Travel margin</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      <p>Decision support for Atlanta coordinators · Verify availability before dispatch</p>
+    </footer>
+
+    <template id="loading-template">
+      <div class="loading-state" role="status">
+        <div class="loading-route" aria-hidden="true"><span></span></div>
+        <p class="eyebrow">Checking Atlanta recipients</p>
+        <h3>Balancing safety, distance, and urgency…</h3>
+        <div class="skeleton-lines" aria-hidden="true"><span></span><span></span><span></span></div>
+      </div>
+    </template>
+  </body>
+</html>
