@@ -1,1 +1,71 @@
 /* status view styles. Loaded after styles.css. */
+
+/* Donor status: one sentence on top, the offer in one line, then who was asked. */
+.status-view { max-width: 980px; margin: 0 auto; padding: 48px 0 10px; }
+.status-head { padding: 24px 26px 18px; background: var(--surface); border: 1px solid var(--line); border-left: 6px solid var(--green); border-radius: 18px; box-shadow: var(--shadow); }
+.status-view[data-tone="done"] .status-head { background: #f3f8e4; border-left-color: #a7bd42; }
+.status-view[data-tone="warn"] .status-head { border-left-color: #d9a441; }
+.status-view[data-tone="stop"] .status-head { border-left-color: var(--red); }
+.status-sentence { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(1.8rem, 4vw, 2.6rem); font-weight: 500; letter-spacing: -.04em; line-height: 1.06; }
+.status-detail { margin: 10px 0 0; color: var(--muted); font-size: .95rem; }
+.status-detail:empty { display: none; }
+.status-detail [role="timer"] { color: var(--amber); font-variant-numeric: tabular-nums; font-weight: 800; }
+.status-detail a { color: var(--green-dark); font-weight: 800; }
+.status-head [data-region="action"]:not(:empty) { margin-top: 16px; }
+.status-head [data-region="action"] .button { padding: 13px 20px; font-size: .84rem; }
+
+/* Compact take on the shared progress bar. */
+.status-progress .progress { margin: 18px 0 0; }
+.status-progress .progress li > span { width: 18px; height: 18px; font-size: 0; }
+.status-progress .progress li::before { top: 8px; }
+.status-progress .progress small { font-size: .6rem; }
+
+.status-summary { margin: 14px 4px 0; color: var(--ink); font-size: .84rem; font-weight: 650; }
+.status-summary strong { font-weight: 800; }
+.status-part { white-space: nowrap; }
+.status-dot { color: var(--muted); }
+
+.status-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); gap: 18px; align-items: start; margin-top: 22px; }
+.status-recipients { padding: 18px 20px; background: rgb(255 253 248 / 94%); border: 1px solid var(--line); border-radius: var(--radius); }
+.status-recipients h2 { margin: 0 0 6px; font-size: .9rem; }
+.status-rows { margin: 0; padding: 0; list-style: none; }
+.status-rows li { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 11px 0; border-top: 1px solid var(--line); font-size: .9rem; font-weight: 650; }
+.status-rows li:first-child { border-top: 0; }
+.status-state { flex: none; padding: 4px 10px; color: var(--green-dark); background: #eff4da; border: 1px solid #c9d68f; border-radius: 99px; font-size: .72rem; font-weight: 800; }
+.status-state[data-tone="hold"] { color: var(--amber); background: var(--amber-bg); border-color: #e2bf7a; }
+.status-state[data-tone="done"] { color: white; background: var(--green); border-color: var(--green); }
+.status-state[data-tone="off"] { color: var(--muted); background: transparent; border-color: var(--line); }
+.status-empty { margin: 6px 0 0; color: var(--muted); font-size: .84rem; }
+
+.status-map .workflow-map-card { border-radius: var(--radius); }
+.status-map .workflow-map, .status-map .workflow-map.google-map { height: 190px; min-height: 0; }
+.status-map .map-topline { padding: 11px 14px; }
+.status-map .map-legend { padding: 0 14px 12px; }
+.status-map .workflow-routes { display: none; }
+
+.status-more { margin-top: 12px; background: rgb(255 253 248 / 70%); border: 1px solid var(--line); border-radius: 14px; }
+.status-more:first-of-type { margin-top: 18px; }
+.status-more > summary { padding: 12px 16px; color: var(--green-dark); cursor: pointer; font-size: .8rem; font-weight: 800; border-radius: 14px; }
+.status-more > summary:focus-visible { outline: 3px solid #a7bd42; outline-offset: 2px; }
+.status-more > div { padding: 0 16px 16px; }
+.status-activity { margin: 0; padding: 0; list-style: none; }
+.status-activity li { display: flex; gap: 12px; justify-content: space-between; padding: 7px 0; border-top: 1px solid var(--line); font-size: .84rem; }
+.status-activity li:first-child { border-top: 0; }
+.status-activity time { flex: none; color: var(--muted); font-size: .75rem; font-variant-numeric: tabular-nums; }
+.status-demo-note { margin: 0 0 10px; color: var(--muted); font-size: .75rem; }
+
+.status-again { margin-top: 18px; text-align: center; }
+.status-link { padding: 4px; color: var(--green); background: none; border: 0; cursor: pointer; font-size: .8rem; font-weight: 800; text-decoration: underline; text-underline-offset: 4px; }
+.status-link:focus-visible { outline: 3px solid #a7bd42; outline-offset: 2px; border-radius: 4px; }
+
+@media (max-width: 760px) {
+  .status-body { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+  .status-view { padding-top: 26px; }
+  .status-head { padding: 20px 18px 16px; border-left-width: 5px; }
+  .status-sentence { font-size: clamp(1.6rem, 8vw, 2.1rem); }
+  .status-detail { font-size: .88rem; }
+  .status-recipients { padding: 14px 16px; }
+  .status-map .workflow-map, .status-map .workflow-map.google-map { height: 170px; }
+}
